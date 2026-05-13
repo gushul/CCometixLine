@@ -217,47 +217,74 @@ fn cache_to_snapshot(c: ApiUsageCache) -> UsageSnapshot {
     }
 }
 
-/// Spawn a detached `ccline --refresh-usage` child. Returns immediately. If
-/// the refresh lock is already held by a fresh process, this is a no-op.
+/// Spawn a detached `ccline --refresh-usage` child. Returns immediately.
+///
+/// Coordinates with sibling segments in the same render: a single render can
+/// have 4+ usage-bearing segments (Usage / WeeklyUsage / BurnRate /
+/// ProjectedExhaust) all hitting SWR. The first segment to land here writes
+/// the lock + spawns; the rest see a fresh lock and skip spawning.
+///
+/// The child unconditionally overwrites the lock with its own pid (via
+/// `refresh_now`) — it does **not** try to "claim" it. That way:
+/// - Concurrent siblings still fan in to one child (the parent's lock deters
+///   re-spawns).
+/// - The child always reaches `release_refresh_lock` at the end of its work,
+///   so the lock doesn't leak even if the parent's claim races weirdly.
+/// - On panic/crash, the 30s TTL self-heals.
 fn spawn_detached_refresh() {
     let now = Utc::now();
-    // Parent claims the lock so a stampede of renderers fans out to a single
-    // child. Child inherits responsibility to release on completion (or the
-    // lock expires after REFRESH_LOCK_TTL_SECS).
-    if !try_acquire_refresh_lock(now) {
+    if let Some(existing) = read_lock_file() {
+        if !existing.is_stale(now, REFRESH_LOCK_TTL_SECS) {
+            // Another sibling in this (or another) render has already kicked
+            // off a refresh. Don't pile on.
+            return;
+        }
+    }
+    let me = LockInfo {
+        pid: std::process::id(),
+        started_at: now.to_rfc3339(),
+    };
+    if !write_lock_file(&me) {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {
-        // Couldn't find ourselves — release so we don't deadlock future
-        // refresh attempts.
         release_refresh_lock();
         return;
     };
-    let spawn = std::process::Command::new(exe)
+    if std::process::Command::new(exe)
         .arg("--refresh-usage")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
-    if spawn.is_err() {
-        // Spawn failed — release the lock so the TTL doesn't delay future
-        // refresh attempts unnecessarily.
+        .spawn()
+        .is_err()
+    {
         release_refresh_lock();
     }
+    // Child overwrites our lock with its own pid and releases on completion.
 }
 
 /// Synchronous refresh used by the `ccline --refresh-usage` subprocess.
-/// Re-acquires the lock (in case parent's claim expired), fetches from the
-/// API, rotates history, writes the cache atomically, then releases.
+/// Unconditionally takes ownership of the lock (overwriting whatever the
+/// parent claimed), fetches from the API, rotates history, writes the cache
+/// atomically, then releases.
 ///
-/// Returns `Ok(())` on success; `Err` strings cover token / network / lock
-/// failures. Errors are non-fatal — the caller (the subprocess `main`) prints
-/// nothing and exits 0 either way, leaving the next render to retry.
+/// Overwriting (rather than checking) is intentional: when spawned by
+/// `spawn_detached_refresh`, the parent has just written a "spawn in flight"
+/// lock with its own pid. The child shouldn't bail at that point — it owns
+/// the work. The cost of overwriting is just clobbering a JSON file with
+/// nearly-identical contents.
+///
+/// Returns `Ok(())` on success; `Err` covers token / network / config
+/// failures. The release runs regardless. Errors are non-fatal — the caller
+/// (the subprocess `main`) prints nothing and exits 0 either way, so the
+/// next render simply retries.
 pub fn refresh_now() -> Result<(), String> {
-    let now = Utc::now();
-    if !try_acquire_refresh_lock(now) {
-        return Err("another refresh process holds the lock".to_string());
-    }
+    let me = LockInfo {
+        pid: std::process::id(),
+        started_at: Utc::now().to_rfc3339(),
+    };
+    let _ = write_lock_file(&me);
     let result = refresh_inner();
     release_refresh_lock();
     result
@@ -418,22 +445,6 @@ fn write_lock_file(lock: &LockInfo) -> bool {
         .ok()
         .and_then(|json| std::fs::write(&p, json).ok())
         .is_some()
-}
-
-/// Attempt to claim the refresh lock. Returns `true` if we acquired it; the
-/// caller is then responsible for calling [`release_refresh_lock`] when done
-/// (or letting the OS reap a stale lock after `REFRESH_LOCK_TTL_SECS`).
-pub fn try_acquire_refresh_lock(now: DateTime<Utc>) -> bool {
-    if let Some(existing) = read_lock_file() {
-        if !existing.is_stale(now, REFRESH_LOCK_TTL_SECS) {
-            return false;
-        }
-    }
-    let me = LockInfo {
-        pid: std::process::id(),
-        started_at: now.to_rfc3339(),
-    };
-    write_lock_file(&me)
 }
 
 /// Remove the refresh lock file. Safe to call when no lock exists.
