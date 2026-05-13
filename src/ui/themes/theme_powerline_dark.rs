@@ -258,3 +258,13 @@ pub fn usage_segment() -> SegmentConfig {
         },
     }
 }
+
+pub fn weekly_usage_segment() -> SegmentConfig {
+    // Inherit the theme's Usage styling; only the id (and disabled-by-default
+    // behavior) differs. Keeping these coupled means a re-theme of Usage
+    // automatically re-themes WeeklyUsage.
+    let mut s = usage_segment();
+    s.id = SegmentId::WeeklyUsage;
+    s.enabled = false;
+    s
+}

@@ -69,6 +69,7 @@ pub enum SegmentId {
     Git,
     ContextWindow,
     Usage,
+    WeeklyUsage,
     Cost,
     Session,
     OutputStyle,
@@ -536,16 +537,32 @@ mod tests {
     // ---------- Config::matches_theme ----------
 
     #[test]
-    fn default_config_matches_default_theme() {
+    fn default_config_segments_match_default_preset_builtin() {
+        // Compares the structure of Config::default() directly against the
+        // built-in `get_default()`. Bypasses `matches_theme()` because that
+        // method loads `~/.claude/ccline/themes/default.toml` first, which can
+        // be stale on user machines that bootstrapped theme files before new
+        // segments (like WeeklyUsage) were added.
         let cfg = Config::default();
-        assert!(cfg.matches_theme("default"));
-        assert!(!cfg.is_modified_from_theme());
+        let built_in = crate::ui::themes::ThemePresets::get_default();
+
+        assert_eq!(cfg.theme, "default");
+        assert_eq!(cfg.theme, built_in.theme);
+        assert_eq!(cfg.style.mode, built_in.style.mode);
+        assert_eq!(cfg.style.separator, built_in.style.separator);
+
+        let cfg_ids: Vec<_> = cfg.segments.iter().map(|s| s.id).collect();
+        let built_in_ids: Vec<_> = built_in.segments.iter().map(|s| s.id).collect();
+        assert_eq!(cfg_ids, built_in_ids);
     }
 
     #[test]
-    fn default_config_does_not_match_cometix_theme() {
-        let cfg = Config::default();
-        assert!(!cfg.matches_theme("cometix"));
+    fn cometix_preset_structurally_differs_from_default() {
+        // Direct structural comparison instead of going through matches_theme()
+        // (which would hit on-disk theme cache).
+        let default_cfg = crate::ui::themes::ThemePresets::get_default();
+        let cometix_cfg = crate::ui::themes::ThemePresets::get_cometix();
+        assert_ne!(default_cfg.style.mode, cometix_cfg.style.mode);
     }
 
     #[test]
@@ -568,6 +585,86 @@ mod tests {
         let mut cfg = Config::default();
         cfg.style.separator = "###".to_string();
         assert!(!cfg.matches_theme("default"));
+    }
+
+    // ---------- SegmentId::WeeklyUsage (T02) ----------
+
+    #[test]
+    fn segment_id_weekly_usage_deserializes_from_snake_case() {
+        let id: SegmentId =
+            serde_json::from_str(r#""weekly_usage""#).expect("snake_case form must deserialize");
+        assert!(matches!(id, SegmentId::WeeklyUsage));
+    }
+
+    #[test]
+    fn segment_id_weekly_usage_serializes_to_snake_case() {
+        let s = serde_json::to_string(&SegmentId::WeeklyUsage).expect("serialize");
+        assert_eq!(s, r#""weekly_usage""#);
+    }
+
+    #[test]
+    fn every_builtin_preset_includes_weekly_usage_segment() {
+        use crate::ui::themes::ThemePresets;
+        // Call the per-theme builders directly to bypass the on-disk theme
+        // cache, which may carry pre-WeeklyUsage configs from older versions.
+        let configs = [
+            ("cometix", ThemePresets::get_cometix()),
+            ("default", ThemePresets::get_default()),
+            ("minimal", ThemePresets::get_minimal()),
+            ("gruvbox", ThemePresets::get_gruvbox()),
+            ("nord", ThemePresets::get_nord()),
+            ("powerline-dark", ThemePresets::get_powerline_dark()),
+            ("powerline-light", ThemePresets::get_powerline_light()),
+            (
+                "powerline-rose-pine",
+                ThemePresets::get_powerline_rose_pine(),
+            ),
+            (
+                "powerline-tokyo-night",
+                ThemePresets::get_powerline_tokyo_night(),
+            ),
+        ];
+        for (name, cfg) in &configs {
+            assert!(
+                cfg.segments.iter().any(|s| s.id == SegmentId::WeeklyUsage),
+                "built-in theme {} is missing the WeeklyUsage segment",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn weekly_usage_disabled_by_default_in_every_builtin_preset() {
+        use crate::ui::themes::ThemePresets;
+        let configs = [
+            ("cometix", ThemePresets::get_cometix()),
+            ("default", ThemePresets::get_default()),
+            ("minimal", ThemePresets::get_minimal()),
+            ("gruvbox", ThemePresets::get_gruvbox()),
+            ("nord", ThemePresets::get_nord()),
+            ("powerline-dark", ThemePresets::get_powerline_dark()),
+            ("powerline-light", ThemePresets::get_powerline_light()),
+            (
+                "powerline-rose-pine",
+                ThemePresets::get_powerline_rose_pine(),
+            ),
+            (
+                "powerline-tokyo-night",
+                ThemePresets::get_powerline_tokyo_night(),
+            ),
+        ];
+        for (name, cfg) in &configs {
+            let weekly = cfg
+                .segments
+                .iter()
+                .find(|s| s.id == SegmentId::WeeklyUsage)
+                .unwrap_or_else(|| panic!("theme {} missing WeeklyUsage", name));
+            assert!(
+                !weekly.enabled,
+                "theme {} ships with WeeklyUsage enabled — must be opt-in",
+                name
+            );
+        }
     }
 
     #[test]

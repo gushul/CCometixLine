@@ -238,7 +238,7 @@ All segments are configurable with:
 - Color customization
 - Format options
 
-Supported segments: Directory, Git, Model, Usage, Time, Cost, OutputStyle
+Supported segments: Directory, Git, Model, Usage, WeeklyUsage, Time, Cost, OutputStyle
 
 ### Model Configuration (`models.toml`)
 
