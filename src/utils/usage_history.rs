@@ -206,6 +206,51 @@ fn format_optional_pct(p: Option<f64>) -> String {
         .unwrap_or_else(|| "  —".to_string())
 }
 
+/// Find the history entry whose timestamp is closest to `now - days_ago`,
+/// within `tolerance_hours` either side. Returns `None` when no entry is
+/// inside the tolerance window. Pure.
+///
+/// Used by the WeeklyUsage trend indicator: pick the entry closest to "this
+/// time last week" so the percent comparison is apples-to-apples.
+pub fn entry_near_offset_days_ago(
+    entries: &[HistoryEntry],
+    days_ago: i64,
+    now: DateTime<Utc>,
+    tolerance_hours: i64,
+) -> Option<&HistoryEntry> {
+    let target = now - Duration::days(days_ago);
+    let tolerance = Duration::hours(tolerance_hours);
+    entries
+        .iter()
+        .filter_map(|e| {
+            e.timestamp_utc().and_then(|t| {
+                let delta = t.signed_duration_since(target).num_seconds().abs();
+                if delta <= tolerance.num_seconds() {
+                    Some((e, delta))
+                } else {
+                    None
+                }
+            })
+        })
+        .min_by_key(|(_, delta)| *delta)
+        .map(|(e, _)| e)
+}
+
+/// Build a compact trend indicator string from current vs past percent.
+/// Returns `↑ Xpp%`, `↓ Xpp%`, or `→ ~0%` (when the delta is below ±0.5pp
+/// — treats noise as flat). "pp%" reads as "percentage points".
+pub fn format_trend_arrow(current: f64, past: f64) -> String {
+    let delta = current - past;
+    if delta.abs() < 0.5 {
+        return "→ ~0%".to_string();
+    }
+    if delta > 0.0 {
+        format!("↑ {:.0}%", delta)
+    } else {
+        format!("↓ {:.0}%", -delta)
+    }
+}
+
 /// Render the summary as one JSON object (single line, no trailing newline).
 pub fn format_stats_json(stats: &Stats) -> String {
     serde_json::json!({
@@ -443,6 +488,73 @@ mod tests {
         assert_eq!(parsed["samples"], 1);
         assert!((parsed["five_hour"]["avg"].as_f64().unwrap() - 23.5).abs() < 0.01);
         assert_eq!(parsed["weekly"]["current"], 67.8);
+    }
+
+    // ---- entry_near_offset_days_ago (T10) ----
+
+    #[test]
+    fn entry_near_offset_returns_none_when_empty() {
+        let now = at(2026, 5, 13, 12);
+        assert!(entry_near_offset_days_ago(&[], 7, now, 24).is_none());
+    }
+
+    #[test]
+    fn entry_near_offset_picks_closest_inside_tolerance() {
+        let now = at(2026, 5, 13, 12);
+        let entries = vec![
+            entry(now - Duration::days(7) - Duration::hours(3), 10.0, 50.0),
+            entry(now - Duration::days(7) + Duration::hours(2), 12.0, 55.0), // closer
+            entry(now - Duration::days(7) - Duration::hours(20), 8.0, 45.0),
+        ];
+        let picked = entry_near_offset_days_ago(&entries, 7, now, 24).expect("found");
+        assert_eq!(picked.weekly, 55.0);
+    }
+
+    #[test]
+    fn entry_near_offset_returns_none_when_no_entry_in_tolerance() {
+        let now = at(2026, 5, 13, 12);
+        // Only entry is 5 days in the past — outside 24h tolerance around 7d.
+        let entries = vec![entry(now - Duration::days(5), 10.0, 50.0)];
+        assert!(entry_near_offset_days_ago(&entries, 7, now, 24).is_none());
+    }
+
+    #[test]
+    fn entry_near_offset_handles_entries_after_target_too() {
+        let now = at(2026, 5, 13, 12);
+        // Entry is 6.5 days ago (12h after target = 7 days ago).
+        let entries = vec![entry(
+            now - Duration::days(7) + Duration::hours(12),
+            1.0,
+            30.0,
+        )];
+        let picked = entry_near_offset_days_ago(&entries, 7, now, 24).expect("found");
+        assert_eq!(picked.weekly, 30.0);
+    }
+
+    // ---- format_trend_arrow ----
+
+    #[test]
+    fn trend_up_arrow_when_increase() {
+        assert_eq!(format_trend_arrow(50.0, 30.0), "↑ 20%");
+    }
+
+    #[test]
+    fn trend_down_arrow_when_decrease() {
+        assert_eq!(format_trend_arrow(20.0, 35.0), "↓ 15%");
+    }
+
+    #[test]
+    fn trend_flat_when_near_zero() {
+        assert_eq!(format_trend_arrow(30.0, 30.0), "→ ~0%");
+        assert_eq!(format_trend_arrow(30.2, 30.0), "→ ~0%");
+        assert_eq!(format_trend_arrow(30.0, 30.3), "→ ~0%");
+    }
+
+    #[test]
+    fn trend_rounds_to_whole_percent() {
+        // 8.7 rounds via :.0 format → 9
+        let s = format_trend_arrow(38.7, 30.0);
+        assert_eq!(s, "↑ 9%");
     }
 
     #[test]

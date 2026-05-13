@@ -226,7 +226,7 @@ Each segment is a column in the status line. Toggle, recolor, or swap icons in `
 | **Git** | 🌿 / `2` | `main ✓` or `feat/x ● ↑3` | enabled | Branch + working-tree status |
 | **ContextWindow** | ⚡️ / `` | `49.8% · 498.0k tokens` | enabled | Conversation context usage out of model limit |
 | **Usage** | 8 circle glyphs ([scale](#usage-indicator-scale)) | `26% · 5-13-22` | disabled | Anthropic 5-hour utilization + reset time |
-| **WeeklyUsage** | same 8 circle glyphs | `32% · 5-14-0` | disabled | Anthropic weekly utilization + reset time |
+| **WeeklyUsage** | same 8 circle glyphs | `32% · 5-14-0 ↑ 12%` | disabled | Anthropic weekly utilization + reset time + week-over-week trend (when enough history) |
 | **BurnRate** | 🔥 / `` | `1.2k/m` or `—` | disabled | Tokens/minute over recent transcript window |
 | **ProjectedExhaust** | ⏳ / `2` | `~38m`, `@16:42`, `after reset`, `—` | disabled | ETA to 5-hour limit at current rate |
 | **Cost** | 💰 / `` | `$48.45` | disabled | Session cost in USD (from Claude Code) |
@@ -295,6 +295,24 @@ color = { r = 220, g = 60, b = 60 }   # 24-bit RGB
 ```
 
 Only the primary text picks up the threshold color — the icon and secondary text keep their configured colors so themes remain recognizable. Threshold lookup reads the segment's `metadata.percent` key, which Usage / WeeklyUsage populate automatically.
+
+### Week-over-week trend (WeeklyUsage)
+
+When the history JSONL (see [Usage history](#usage-history)) contains an entry close to "this time last week", the WeeklyUsage segment appends a small arrow + delta to its secondary text:
+
+| Symbol | Meaning |
+| --- | --- |
+| `↑ 12%` | up 12 percentage points vs the same point last week |
+| `↓ 5%` | down 5 percentage points |
+| `→ ~0%` | within ±0.5pp of last week — treats noise as flat |
+
+Trend is hidden silently when no comparable history exists (typically the first ~7 days after install). Configurable:
+
+```toml
+[segments.weekly_usage.options]
+show_trend = true                  # default; set false to hide
+trend_tolerance_hours = 24         # how far from "exactly 7 days ago" to accept a match (default 24h)
+```
 
 ### Reset time format
 
