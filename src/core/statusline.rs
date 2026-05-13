@@ -453,6 +453,72 @@ impl StatusLineGenerator {
     }
 }
 
+pub fn collect_all_segments(
+    config: &Config,
+    input: &crate::config::InputData,
+) -> Vec<(SegmentConfig, SegmentData)> {
+    use crate::core::segments::*;
+
+    let mut results = Vec::new();
+
+    for segment_config in &config.segments {
+        // Skip disabled segments to avoid unnecessary API requests
+        if !segment_config.enabled {
+            continue;
+        }
+
+        let segment_data = match segment_config.id {
+            crate::config::SegmentId::Model => {
+                let segment = ModelSegment::new();
+                segment.collect(input)
+            }
+            crate::config::SegmentId::Directory => {
+                let segment = DirectorySegment::new();
+                segment.collect(input)
+            }
+            crate::config::SegmentId::Git => {
+                let show_sha = segment_config
+                    .options
+                    .get("show_sha")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let segment = GitSegment::new().with_sha(show_sha);
+                segment.collect(input)
+            }
+            crate::config::SegmentId::ContextWindow => {
+                let segment = ContextWindowSegment::new();
+                segment.collect(input)
+            }
+            crate::config::SegmentId::Usage => {
+                let segment = UsageSegment::new();
+                segment.collect(input)
+            }
+            crate::config::SegmentId::Cost => {
+                let segment = CostSegment::new();
+                segment.collect(input)
+            }
+            crate::config::SegmentId::Session => {
+                let segment = SessionSegment::new();
+                segment.collect(input)
+            }
+            crate::config::SegmentId::OutputStyle => {
+                let segment = OutputStyleSegment::new();
+                segment.collect(input)
+            }
+            crate::config::SegmentId::Update => {
+                let segment = UpdateSegment::new();
+                segment.collect(input)
+            }
+        };
+
+        if let Some(data) = segment_data {
+            results.push((segment_config.clone(), data));
+        }
+    }
+
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,70 +649,4 @@ mod tests {
         // Only one visible segment → no separator.
         assert!(!out.contains(" | "), "spurious separator in: {:?}", out);
     }
-}
-
-pub fn collect_all_segments(
-    config: &Config,
-    input: &crate::config::InputData,
-) -> Vec<(SegmentConfig, SegmentData)> {
-    use crate::core::segments::*;
-
-    let mut results = Vec::new();
-
-    for segment_config in &config.segments {
-        // Skip disabled segments to avoid unnecessary API requests
-        if !segment_config.enabled {
-            continue;
-        }
-
-        let segment_data = match segment_config.id {
-            crate::config::SegmentId::Model => {
-                let segment = ModelSegment::new();
-                segment.collect(input)
-            }
-            crate::config::SegmentId::Directory => {
-                let segment = DirectorySegment::new();
-                segment.collect(input)
-            }
-            crate::config::SegmentId::Git => {
-                let show_sha = segment_config
-                    .options
-                    .get("show_sha")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let segment = GitSegment::new().with_sha(show_sha);
-                segment.collect(input)
-            }
-            crate::config::SegmentId::ContextWindow => {
-                let segment = ContextWindowSegment::new();
-                segment.collect(input)
-            }
-            crate::config::SegmentId::Usage => {
-                let segment = UsageSegment::new();
-                segment.collect(input)
-            }
-            crate::config::SegmentId::Cost => {
-                let segment = CostSegment::new();
-                segment.collect(input)
-            }
-            crate::config::SegmentId::Session => {
-                let segment = SessionSegment::new();
-                segment.collect(input)
-            }
-            crate::config::SegmentId::OutputStyle => {
-                let segment = OutputStyleSegment::new();
-                segment.collect(input)
-            }
-            crate::config::SegmentId::Update => {
-                let segment = UpdateSegment::new();
-                segment.collect(input)
-            }
-        };
-
-        if let Some(data) = segment_data {
-            results.push((segment_config.clone(), data));
-        }
-    }
-
-    results
 }
