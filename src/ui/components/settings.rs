@@ -34,6 +34,7 @@ impl SettingsComponent {
                 SegmentId::Usage => "Usage",
                 SegmentId::WeeklyUsage => "Weekly Usage",
                 SegmentId::BurnRate => "Burn Rate",
+                SegmentId::ProjectedExhaust => "Projected Exhaust",
                 SegmentId::Cost => "Cost",
                 SegmentId::Session => "Session",
                 SegmentId::OutputStyle => "Output Style",

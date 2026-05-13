@@ -108,6 +108,7 @@ pub enum SegmentId {
     Usage,
     WeeklyUsage,
     BurnRate,
+    ProjectedExhaust,
     Cost,
     Session,
     OutputStyle,
@@ -819,6 +820,34 @@ mod tests {
                 cfg.segments.iter().any(|s| s.id == SegmentId::WeeklyUsage),
                 "built-in theme {} is missing the WeeklyUsage segment",
                 name
+            );
+        }
+    }
+
+    #[test]
+    fn every_builtin_preset_includes_projected_exhaust_segment() {
+        use crate::ui::themes::ThemePresets;
+        let configs = [
+            ThemePresets::get_cometix(),
+            ThemePresets::get_default(),
+            ThemePresets::get_minimal(),
+            ThemePresets::get_gruvbox(),
+            ThemePresets::get_nord(),
+            ThemePresets::get_powerline_dark(),
+            ThemePresets::get_powerline_light(),
+            ThemePresets::get_powerline_rose_pine(),
+            ThemePresets::get_powerline_tokyo_night(),
+        ];
+        for cfg in &configs {
+            let seg = cfg
+                .segments
+                .iter()
+                .find(|s| s.id == SegmentId::ProjectedExhaust)
+                .unwrap_or_else(|| panic!("theme {} missing ProjectedExhaust", cfg.theme));
+            assert!(
+                !seg.enabled,
+                "theme {} has ProjectedExhaust enabled",
+                cfg.theme
             );
         }
     }

@@ -528,6 +528,10 @@ pub fn collect_all_segments(
                 let segment = BurnRateSegment::new();
                 segment.collect(input)
             }
+            crate::config::SegmentId::ProjectedExhaust => {
+                let segment = ProjectedExhaustSegment::new();
+                segment.collect(input)
+            }
             crate::config::SegmentId::Cost => {
                 let segment = CostSegment::new();
                 segment.collect(input)

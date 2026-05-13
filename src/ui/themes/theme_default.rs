@@ -215,3 +215,35 @@ pub fn burn_rate_segment() -> SegmentConfig {
         },
     }
 }
+
+pub fn projected_exhaust_segment() -> SegmentConfig {
+    // Shared definition reused by every theme. v1 ships with no theme-specific
+    // styling — themes can override later by replacing the entry in their
+    // preset vec.
+    SegmentConfig {
+        id: SegmentId::ProjectedExhaust,
+        enabled: false,
+        icon: IconConfig {
+            plain: "⏱".to_string(),
+            nerd_font: "\u{f520}".to_string(),
+        },
+        colors: ColorConfig {
+            icon: Some(AnsiColor::Color16 { c16: 11 }), // bright yellow
+            text: Some(AnsiColor::Color16 { c16: 11 }),
+            background: None,
+        },
+        styles: TextStyleConfig::default(),
+        options: {
+            let mut opts = HashMap::new();
+            opts.insert(
+                "format".to_string(),
+                serde_json::Value::String("duration".to_string()),
+            );
+            opts.insert(
+                "min_history_seconds".to_string(),
+                serde_json::Value::Number(300.into()),
+            );
+            opts
+        },
+    }
+}

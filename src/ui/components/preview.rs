@@ -151,6 +151,11 @@ impl PreviewComponent {
                     secondary: String::new(),
                     metadata: HashMap::new(),
                 },
+                SegmentId::ProjectedExhaust => SegmentData {
+                    primary: "~38m".to_string(),
+                    secondary: String::new(),
+                    metadata: HashMap::new(),
+                },
                 SegmentId::Cost => SegmentData {
                     primary: "$0.02".to_string(),
                     secondary: "".to_string(),

@@ -45,9 +45,9 @@ pub struct UsagePeriod {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// On-disk cache shape. Backwards-compatible with the v1 layout (which only
-/// had `resets_at`, populated from the 7d period). New `five_hour_resets_at`
-/// is optional + defaulted so older cache files still parse.
+/// On-disk cache shape. Backwards-compatible with prior layouts: legacy
+/// caches without `five_hour_resets_at` or the T05 `previous_*` fields still
+/// parse — every additive field is `#[serde(default)]`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiUsageCache {
     pub five_hour_utilization: f64,
@@ -57,6 +57,13 @@ pub struct ApiUsageCache {
     #[serde(default)]
     pub five_hour_resets_at: Option<String>,
     pub cached_at: String,
+    /// Five-hour utilization from the previous successful fetch. T05 uses
+    /// `(current, previous)` over `(cached_at, previous_cached_at)` to derive
+    /// percent-per-minute and project the exhaust time.
+    #[serde(default)]
+    pub previous_five_hour_utilization: Option<f64>,
+    #[serde(default)]
+    pub previous_cached_at: Option<String>,
 }
 
 impl ApiUsageCache {
@@ -66,13 +73,17 @@ impl ApiUsageCache {
 }
 
 /// A snapshot of both utilization windows + their reset times, used by
-/// segments to pick the value they want to render.
+/// segments to pick the value they want to render. T05 also surfaces the
+/// previous five-hour reading so it can compute a projection without
+/// re-reading the cache.
 #[derive(Debug, Clone)]
 pub struct UsageSnapshot {
     pub five_hour_utilization: f64,
     pub five_hour_resets_at: Option<String>,
     pub seven_day_utilization: f64,
     pub seven_day_resets_at: Option<String>,
+    pub previous_five_hour_utilization: Option<f64>,
+    pub previous_cached_at: Option<String>,
 }
 
 /// Fetch fresh data from the API or read it from the shared cache, whichever
@@ -113,17 +124,27 @@ pub fn fetch_or_cached(segment_id: SegmentId) -> Option<UsageSnapshot> {
             five_hour_resets_at: c.five_hour_resets_at.clone(),
             seven_day_utilization: c.seven_day_utilization,
             seven_day_resets_at: c.resets_at.clone(),
+            previous_five_hour_utilization: c.previous_five_hour_utilization,
+            previous_cached_at: c.previous_cached_at.clone(),
         });
     }
 
     match fetch_api_usage(api_base_url, &token, timeout) {
         Some(response) => {
+            // Promote the previously-cached snapshot into the `previous_*`
+            // slots. This is the only place where history is rotated.
+            let (previous_util, previous_at) = match cached.as_ref() {
+                Some(c) => (Some(c.five_hour_utilization), Some(c.cached_at.clone())),
+                None => (None, None),
+            };
             let cache = ApiUsageCache {
                 five_hour_utilization: response.five_hour.utilization,
                 seven_day_utilization: response.seven_day.utilization,
                 resets_at: response.seven_day.resets_at.clone(),
                 five_hour_resets_at: response.five_hour.resets_at.clone(),
                 cached_at: Utc::now().to_rfc3339(),
+                previous_five_hour_utilization: previous_util,
+                previous_cached_at: previous_at.clone(),
             };
             save_cache(&cache);
             Some(UsageSnapshot {
@@ -131,6 +152,8 @@ pub fn fetch_or_cached(segment_id: SegmentId) -> Option<UsageSnapshot> {
                 five_hour_resets_at: response.five_hour.resets_at,
                 seven_day_utilization: response.seven_day.utilization,
                 seven_day_resets_at: response.seven_day.resets_at,
+                previous_five_hour_utilization: previous_util,
+                previous_cached_at: previous_at,
             })
         }
         None => cached.map(|c| UsageSnapshot {
@@ -138,6 +161,8 @@ pub fn fetch_or_cached(segment_id: SegmentId) -> Option<UsageSnapshot> {
             five_hour_resets_at: c.five_hour_resets_at.clone(),
             seven_day_utilization: c.seven_day_utilization,
             seven_day_resets_at: c.resets_at.clone(),
+            previous_five_hour_utilization: c.previous_five_hour_utilization,
+            previous_cached_at: c.previous_cached_at.clone(),
         }),
     }
 }
@@ -424,13 +449,15 @@ mod tests {
     }
 
     #[test]
-    fn cache_schema_round_trips_v2_with_both_reset_times() {
+    fn cache_schema_round_trips_with_all_optional_fields() {
         let cache = ApiUsageCache {
             five_hour_utilization: 22.0,
             seven_day_utilization: 26.0,
             resets_at: Some("seven-day-reset".into()),
             five_hour_resets_at: Some("five-hour-reset".into()),
             cached_at: "now".into(),
+            previous_five_hour_utilization: Some(20.0),
+            previous_cached_at: Some("earlier".into()),
         };
         let json = serde_json::to_string(&cache).unwrap();
         let parsed: ApiUsageCache = serde_json::from_str(&json).unwrap();
@@ -439,6 +466,24 @@ mod tests {
             parsed.five_hour_resets_at.as_deref(),
             Some("five-hour-reset")
         );
+        assert_eq!(parsed.previous_five_hour_utilization, Some(20.0));
+        assert_eq!(parsed.previous_cached_at.as_deref(), Some("earlier"));
+    }
+
+    #[test]
+    fn cache_schema_loads_with_no_previous_fields() {
+        // The v1/v2 caches that pre-date T05 still load cleanly; previous_*
+        // come back as None.
+        let mid = r#"{
+            "five_hour_utilization": 23.0,
+            "seven_day_utilization": 67.0,
+            "resets_at": "2026-05-20T00:00:00Z",
+            "five_hour_resets_at": "2026-05-13T20:00:00Z",
+            "cached_at": "2026-05-13T15:00:00Z"
+        }"#;
+        let cache: ApiUsageCache = serde_json::from_str(mid).expect("parse");
+        assert!(cache.previous_five_hour_utilization.is_none());
+        assert!(cache.previous_cached_at.is_none());
     }
 
     // ---------- ApiUsageResponse forward-compat (moved from usage.rs::tests) ----------
