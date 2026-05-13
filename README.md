@@ -191,6 +191,20 @@ ccline --theme powerline-dark
 ccline --theme my-custom-theme
 ```
 
+### Usage history
+
+`ccline --stats` summarizes the JSONL history accumulated by the background refresh subprocess (`~/.claude/ccline/usage_history.jsonl`). One line per refresh; no network.
+
+```bash
+ccline --stats              # last 7 days (default)
+ccline --stats day          # last 24 hours
+ccline --stats week
+ccline --stats month        # last 30 days
+ccline --stats --json       # one-line JSON, scriptable
+```
+
+Plain output shows samples + avg/max/current for both 5-hour and weekly utilization. JSON output mirrors the same fields. History is bounded: when the file grows past ~1 MB the writer prunes entries older than 90 days.
+
 ### Claude Code Enhancement
 
 ```bash

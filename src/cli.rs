@@ -21,6 +21,23 @@ pub struct Cli {
     /// direct invocation.
     #[arg(long = "refresh-usage", hide = true)]
     pub refresh_usage: bool,
+
+    /// Print a usage-history summary and exit. Optional window argument:
+    /// `day` (last 24h), `week` (last 7 days — default), `month` (last 30
+    /// days). History is populated by the background refresh — wait a few
+    /// minutes after first run for data.
+    #[arg(
+        long = "stats",
+        value_name = "WINDOW",
+        num_args = 0..=1,
+        default_missing_value = "week",
+        value_parser = ["day", "week", "month"],
+    )]
+    pub stats: Option<String>,
+
+    /// Emit `--stats` output as JSON on one line instead of a plain-text table.
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 impl Cli {

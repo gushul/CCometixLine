@@ -297,16 +297,26 @@ fn refresh_inner() -> Result<(), String> {
         Some(c) => (Some(c.five_hour_utilization), Some(c.cached_at.clone())),
         None => (None, None),
     };
+    let now = Utc::now();
     let cache = ApiUsageCache {
         five_hour_utilization: response.five_hour.utilization,
         seven_day_utilization: response.seven_day.utilization,
         resets_at: response.seven_day.resets_at,
         five_hour_resets_at: response.five_hour.resets_at,
-        cached_at: Utc::now().to_rfc3339(),
+        cached_at: now.to_rfc3339(),
         previous_five_hour_utilization: previous_util,
         previous_cached_at: previous_at,
     };
     save_cache(&cache);
+
+    // Append one row to the long-term history JSONL (T08). Best-effort —
+    // failure here doesn't fail the refresh.
+    crate::utils::usage_history::append(&crate::utils::usage_history::HistoryEntry {
+        t: now.to_rfc3339(),
+        five_hour: cache.five_hour_utilization,
+        weekly: cache.seven_day_utilization,
+    });
+
     Ok(())
 }
 

@@ -15,6 +15,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(window_str) = cli.stats.as_deref() {
+        use ccometixline::utils::usage_history;
+        let window = usage_history::Window::from_option_str(window_str)
+            .unwrap_or(usage_history::Window::Week);
+        let entries = usage_history::load_all();
+        let stats = usage_history::aggregate(&entries, window, chrono::Utc::now());
+        if cli.json {
+            println!("{}", usage_history::format_stats_json(&stats));
+        } else {
+            print!("{}", usage_history::format_stats_plain(&stats));
+        }
+        return Ok(());
+    }
+
     if cli.config {
         ccometixline::ui::run_configurator()?;
         return Ok(());
