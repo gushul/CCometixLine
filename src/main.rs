@@ -7,6 +7,14 @@ use std::io::{self, IsTerminal};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse_args();
 
+    // Detached refresh subprocess invoked by the statusline. Always exits 0
+    // even on failure (the next render will simply retry); errors here would
+    // surface as zombie processes or spurious user output.
+    if cli.refresh_usage {
+        let _ = ccometixline::core::segments::usage_api::refresh_now();
+        return Ok(());
+    }
+
     if cli.config {
         ccometixline::ui::run_configurator()?;
         return Ok(());

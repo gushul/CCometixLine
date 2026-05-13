@@ -21,6 +21,81 @@ use std::collections::HashMap;
 pub const DEFAULT_API_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_CACHE_DURATION_SECS: u64 = 180;
 pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 2;
+/// Default upper bound on cache age — past this, the segment treats the cache
+/// as too stale to serve. The refresh subprocess will still try to repopulate
+/// it in the background.
+pub const DEFAULT_REVALIDATE_AFTER_SECS: i64 = 1800;
+/// Hold a refresh lock for at most this long; older locks are considered
+/// abandoned (process died mid-fetch) and can be overridden.
+pub const REFRESH_LOCK_TTL_SECS: i64 = 30;
+
+/// SWR cache state inferred from the cached snapshot's age + the segment's
+/// freshness thresholds. Used by [`fetch_or_cached`] to decide whether to
+/// serve, refresh in the background, or fall back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheState {
+    /// No cache file (or unparseable timestamp). No data to serve.
+    Cold,
+    /// Fresh enough — serve directly, no refresh needed.
+    Hot,
+    /// Past `hot_seconds` but inside `revalidate_seconds` — serve cache AND
+    /// trigger a background refresh so the next render is fresher.
+    SoftStale,
+    /// Past `revalidate_seconds` — too old to trust; don't serve. Refresh.
+    HardStale,
+}
+
+/// Refresh-lock contents — a tiny JSON file that flags "a refresh subprocess
+/// is currently in flight". Older locks (past [`REFRESH_LOCK_TTL_SECS`]) are
+/// considered orphaned and can be overridden.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockInfo {
+    pub pid: u32,
+    pub started_at: String,
+}
+
+impl LockInfo {
+    pub fn parse(content: &str) -> Option<LockInfo> {
+        serde_json::from_str(content).ok()
+    }
+
+    pub fn started_at_dt(&self) -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(&self.started_at)
+            .ok()
+            .map(|t| t.with_timezone(&Utc))
+    }
+
+    /// A lock is stale if it can't be parsed, its timestamp is malformed, or
+    /// the holder started more than `ttl_seconds` ago.
+    pub fn is_stale(&self, now: DateTime<Utc>, ttl_seconds: i64) -> bool {
+        match self.started_at_dt() {
+            Some(t) => now.signed_duration_since(t).num_seconds() > ttl_seconds,
+            None => true,
+        }
+    }
+}
+
+/// Classify a cached snapshot's age into one of the four [`CacheState`]
+/// values. Pure — driven by `cached_at` + `now` + the two thresholds.
+pub fn classify_cache(
+    cached_at: Option<&str>,
+    now: DateTime<Utc>,
+    hot_seconds: i64,
+    revalidate_seconds: i64,
+) -> CacheState {
+    let cached_at_dt = match cached_at.and_then(|s| DateTime::parse_from_rfc3339(s).ok()) {
+        Some(t) => t.with_timezone(&Utc),
+        None => return CacheState::Cold,
+    };
+    let age = now.signed_duration_since(cached_at_dt).num_seconds();
+    if age < hot_seconds {
+        CacheState::Hot
+    } else if age < revalidate_seconds {
+        CacheState::SoftStale
+    } else {
+        CacheState::HardStale
+    }
+}
 
 /// Parsed response from `GET /api/oauth/usage`.
 ///
@@ -86,85 +161,153 @@ pub struct UsageSnapshot {
     pub previous_cached_at: Option<String>,
 }
 
-/// Fetch fresh data from the API or read it from the shared cache, whichever
-/// is appropriate given the segment's `cache_duration` option.
+/// Stale-while-revalidate hot path. Never blocks on network.
 ///
-/// `segment_id` is used only to look up the segment's options inside the
-/// loaded Config — both `Usage` and `WeeklyUsage` are valid inputs.
+/// - **Hot** cache → serve from disk.
+/// - **SoftStale** → serve from disk AND spawn a detached `ccline
+///   --refresh-usage` so the next render is fresher.
+/// - **HardStale** / **Cold** → return `None` and spawn refresh; the segment
+///   either falls back to its placeholder or hides (depending on its impl).
+///
+/// `segment_id` is used only to look up the segment's `cache_duration` and
+/// `revalidate_after_seconds` options.
 pub fn fetch_or_cached(segment_id: SegmentId) -> Option<UsageSnapshot> {
-    let token = credentials::get_oauth_token()?;
     let config = crate::config::Config::load().ok()?;
     let opts = config.segments.iter().find(|s| s.id == segment_id);
 
+    let hot_seconds = opts
+        .and_then(|sc| sc.options.get("cache_duration"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_CACHE_DURATION_SECS as i64);
+    let revalidate_seconds = opts
+        .and_then(|sc| sc.options.get("revalidate_after_seconds"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_REVALIDATE_AFTER_SECS);
+
+    let cached = load_cache();
+    let now = Utc::now();
+    let state = classify_cache(
+        cached.as_ref().map(|c| c.cached_at.as_str()),
+        now,
+        hot_seconds,
+        revalidate_seconds,
+    );
+
+    match state {
+        CacheState::Hot => cached.map(cache_to_snapshot),
+        CacheState::SoftStale => {
+            spawn_detached_refresh();
+            cached.map(cache_to_snapshot)
+        }
+        CacheState::HardStale | CacheState::Cold => {
+            spawn_detached_refresh();
+            None
+        }
+    }
+}
+
+fn cache_to_snapshot(c: ApiUsageCache) -> UsageSnapshot {
+    UsageSnapshot {
+        five_hour_utilization: c.five_hour_utilization,
+        five_hour_resets_at: c.five_hour_resets_at.clone(),
+        seven_day_utilization: c.seven_day_utilization,
+        seven_day_resets_at: c.resets_at.clone(),
+        previous_five_hour_utilization: c.previous_five_hour_utilization,
+        previous_cached_at: c.previous_cached_at,
+    }
+}
+
+/// Spawn a detached `ccline --refresh-usage` child. Returns immediately. If
+/// the refresh lock is already held by a fresh process, this is a no-op.
+fn spawn_detached_refresh() {
+    let now = Utc::now();
+    // Parent claims the lock so a stampede of renderers fans out to a single
+    // child. Child inherits responsibility to release on completion (or the
+    // lock expires after REFRESH_LOCK_TTL_SECS).
+    if !try_acquire_refresh_lock(now) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        // Couldn't find ourselves — release so we don't deadlock future
+        // refresh attempts.
+        release_refresh_lock();
+        return;
+    };
+    let spawn = std::process::Command::new(exe)
+        .arg("--refresh-usage")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if spawn.is_err() {
+        // Spawn failed — release the lock so the TTL doesn't delay future
+        // refresh attempts unnecessarily.
+        release_refresh_lock();
+    }
+}
+
+/// Synchronous refresh used by the `ccline --refresh-usage` subprocess.
+/// Re-acquires the lock (in case parent's claim expired), fetches from the
+/// API, rotates history, writes the cache atomically, then releases.
+///
+/// Returns `Ok(())` on success; `Err` strings cover token / network / lock
+/// failures. Errors are non-fatal — the caller (the subprocess `main`) prints
+/// nothing and exits 0 either way, leaving the next render to retry.
+pub fn refresh_now() -> Result<(), String> {
+    let now = Utc::now();
+    if !try_acquire_refresh_lock(now) {
+        return Err("another refresh process holds the lock".to_string());
+    }
+    let result = refresh_inner();
+    release_refresh_lock();
+    result
+}
+
+fn refresh_inner() -> Result<(), String> {
+    let token = credentials::get_oauth_token().ok_or("no OAuth token available")?;
+
+    // Read api_base_url + timeout from any segment that has them — Usage is
+    // the historical home. Defaults are fine if no segment configured them.
+    let config = crate::config::Config::load().map_err(|e| format!("config: {}", e))?;
+    let opts = config
+        .segments
+        .iter()
+        .find(|s| s.id == SegmentId::Usage)
+        .or_else(|| {
+            config
+                .segments
+                .iter()
+                .find(|s| s.id == SegmentId::WeeklyUsage)
+        });
     let api_base_url = opts
         .and_then(|sc| sc.options.get("api_base_url"))
         .and_then(|v| v.as_str())
         .unwrap_or(DEFAULT_API_BASE_URL);
-
-    let cache_duration = opts
-        .and_then(|sc| sc.options.get("cache_duration"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_CACHE_DURATION_SECS);
-
     let timeout = opts
         .and_then(|sc| sc.options.get("timeout"))
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_HTTP_TIMEOUT_SECS);
 
+    let response =
+        fetch_api_usage(api_base_url, &token, timeout).ok_or_else(|| "fetch failed".to_string())?;
+
+    // Rotate: existing current values → previous slots.
     let cached = load_cache();
-    let cache_is_hot = cached
-        .as_ref()
-        .map(|c| is_cache_valid(c, cache_duration))
-        .unwrap_or(false);
-
-    if cache_is_hot {
-        let c = cached.unwrap();
-        return Some(UsageSnapshot {
-            five_hour_utilization: c.five_hour_utilization,
-            five_hour_resets_at: c.five_hour_resets_at.clone(),
-            seven_day_utilization: c.seven_day_utilization,
-            seven_day_resets_at: c.resets_at.clone(),
-            previous_five_hour_utilization: c.previous_five_hour_utilization,
-            previous_cached_at: c.previous_cached_at.clone(),
-        });
-    }
-
-    match fetch_api_usage(api_base_url, &token, timeout) {
-        Some(response) => {
-            // Promote the previously-cached snapshot into the `previous_*`
-            // slots. This is the only place where history is rotated.
-            let (previous_util, previous_at) = match cached.as_ref() {
-                Some(c) => (Some(c.five_hour_utilization), Some(c.cached_at.clone())),
-                None => (None, None),
-            };
-            let cache = ApiUsageCache {
-                five_hour_utilization: response.five_hour.utilization,
-                seven_day_utilization: response.seven_day.utilization,
-                resets_at: response.seven_day.resets_at.clone(),
-                five_hour_resets_at: response.five_hour.resets_at.clone(),
-                cached_at: Utc::now().to_rfc3339(),
-                previous_five_hour_utilization: previous_util,
-                previous_cached_at: previous_at.clone(),
-            };
-            save_cache(&cache);
-            Some(UsageSnapshot {
-                five_hour_utilization: response.five_hour.utilization,
-                five_hour_resets_at: response.five_hour.resets_at,
-                seven_day_utilization: response.seven_day.utilization,
-                seven_day_resets_at: response.seven_day.resets_at,
-                previous_five_hour_utilization: previous_util,
-                previous_cached_at: previous_at,
-            })
-        }
-        None => cached.map(|c| UsageSnapshot {
-            five_hour_utilization: c.five_hour_utilization,
-            five_hour_resets_at: c.five_hour_resets_at.clone(),
-            seven_day_utilization: c.seven_day_utilization,
-            seven_day_resets_at: c.resets_at.clone(),
-            previous_five_hour_utilization: c.previous_five_hour_utilization,
-            previous_cached_at: c.previous_cached_at.clone(),
-        }),
-    }
+    let (previous_util, previous_at) = match cached.as_ref() {
+        Some(c) => (Some(c.five_hour_utilization), Some(c.cached_at.clone())),
+        None => (None, None),
+    };
+    let cache = ApiUsageCache {
+        five_hour_utilization: response.five_hour.utilization,
+        seven_day_utilization: response.seven_day.utilization,
+        resets_at: response.seven_day.resets_at,
+        five_hour_resets_at: response.five_hour.resets_at,
+        cached_at: Utc::now().to_rfc3339(),
+        previous_five_hour_utilization: previous_util,
+        previous_cached_at: previous_at,
+    };
+    save_cache(&cache);
+    Ok(())
 }
 
 /// Build the segment's primary/secondary/metadata from a single utilization
@@ -239,6 +382,57 @@ fn get_cache_path() -> Option<std::path::PathBuf> {
     )
 }
 
+fn get_lock_path() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(
+        home.join(".claude")
+            .join("ccline")
+            .join(".usage_refresh.lock"),
+    )
+}
+
+fn read_lock_file() -> Option<LockInfo> {
+    let p = get_lock_path()?;
+    let content = std::fs::read_to_string(&p).ok()?;
+    LockInfo::parse(&content)
+}
+
+fn write_lock_file(lock: &LockInfo) -> bool {
+    let Some(p) = get_lock_path() else {
+        return false;
+    };
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    serde_json::to_string(lock)
+        .ok()
+        .and_then(|json| std::fs::write(&p, json).ok())
+        .is_some()
+}
+
+/// Attempt to claim the refresh lock. Returns `true` if we acquired it; the
+/// caller is then responsible for calling [`release_refresh_lock`] when done
+/// (or letting the OS reap a stale lock after `REFRESH_LOCK_TTL_SECS`).
+pub fn try_acquire_refresh_lock(now: DateTime<Utc>) -> bool {
+    if let Some(existing) = read_lock_file() {
+        if !existing.is_stale(now, REFRESH_LOCK_TTL_SECS) {
+            return false;
+        }
+    }
+    let me = LockInfo {
+        pid: std::process::id(),
+        started_at: now.to_rfc3339(),
+    };
+    write_lock_file(&me)
+}
+
+/// Remove the refresh lock file. Safe to call when no lock exists.
+pub fn release_refresh_lock() {
+    if let Some(p) = get_lock_path() {
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
 fn load_cache() -> Option<ApiUsageCache> {
     let cache_path = get_cache_path()?;
     if !cache_path.exists() {
@@ -249,23 +443,26 @@ fn load_cache() -> Option<ApiUsageCache> {
 }
 
 fn save_cache(cache: &ApiUsageCache) {
-    if let Some(cache_path) = get_cache_path() {
-        if let Some(parent) = cache_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(cache) {
-            let _ = std::fs::write(&cache_path, json);
-        }
+    let Some(cache_path) = get_cache_path() else {
+        return;
+    };
+    if let Some(parent) = cache_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-}
-
-fn is_cache_valid(cache: &ApiUsageCache, cache_duration: u64) -> bool {
-    DateTime::parse_from_rfc3339(&cache.cached_at)
-        .map(|cached_at| {
-            let elapsed = Utc::now().signed_duration_since(cached_at.with_timezone(&Utc));
-            elapsed.num_seconds() < cache_duration as i64
-        })
-        .unwrap_or(false)
+    let Ok(json) = serde_json::to_string_pretty(cache) else {
+        return;
+    };
+    // Atomic write: write to sibling .tmp file then rename. Rename is atomic
+    // on POSIX; on Windows std::fs::rename overwrites since Rust 1.71. A
+    // partial write to .tmp doesn't corrupt the live cache.
+    let tmp_path = cache_path.with_extension("json.tmp");
+    if std::fs::write(&tmp_path, json).is_err() {
+        return;
+    }
+    if std::fs::rename(&tmp_path, &cache_path).is_err() {
+        // Best-effort cleanup of the temp file if rename failed.
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 }
 
 fn get_claude_code_version() -> String {
@@ -430,6 +627,135 @@ mod tests {
             weekly_data.metadata.get("dynamic_icon").unwrap(),
             "\u{f0aa4}"
         ); // slice_7
+    }
+
+    // ---------- classify_cache (T09) ----------
+
+    use chrono::TimeZone;
+
+    fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn classify_cold_when_no_timestamp() {
+        let now = at(2026, 5, 13, 12, 0);
+        assert_eq!(classify_cache(None, now, 180, 1800), CacheState::Cold);
+    }
+
+    #[test]
+    fn classify_cold_when_malformed_timestamp() {
+        let now = at(2026, 5, 13, 12, 0);
+        assert_eq!(
+            classify_cache(Some("not-a-date"), now, 180, 1800),
+            CacheState::Cold
+        );
+        assert_eq!(classify_cache(Some(""), now, 180, 1800), CacheState::Cold);
+    }
+
+    #[test]
+    fn classify_hot_when_within_freshness_window() {
+        let now = at(2026, 5, 13, 12, 0);
+        let cached = (now - Duration::seconds(60)).to_rfc3339();
+        assert_eq!(
+            classify_cache(Some(&cached), now, 180, 1800),
+            CacheState::Hot
+        );
+    }
+
+    #[test]
+    fn classify_soft_stale_between_thresholds() {
+        let now = at(2026, 5, 13, 12, 0);
+        // 5 minutes old: past 180s hot window, inside 1800s revalidate window.
+        let cached = (now - Duration::seconds(300)).to_rfc3339();
+        assert_eq!(
+            classify_cache(Some(&cached), now, 180, 1800),
+            CacheState::SoftStale
+        );
+    }
+
+    #[test]
+    fn classify_hard_stale_past_revalidate() {
+        let now = at(2026, 5, 13, 12, 0);
+        let cached = (now - Duration::seconds(3600)).to_rfc3339(); // 1h old
+        assert_eq!(
+            classify_cache(Some(&cached), now, 180, 1800),
+            CacheState::HardStale
+        );
+    }
+
+    #[test]
+    fn classify_exact_boundary_inclusive_hot() {
+        let now = at(2026, 5, 13, 12, 0);
+        // Cache exactly hot_seconds old → just past hot → SoftStale.
+        let cached = (now - Duration::seconds(180)).to_rfc3339();
+        assert_eq!(
+            classify_cache(Some(&cached), now, 180, 1800),
+            CacheState::SoftStale
+        );
+        // 1s younger → Hot.
+        let cached = (now - Duration::seconds(179)).to_rfc3339();
+        assert_eq!(
+            classify_cache(Some(&cached), now, 180, 1800),
+            CacheState::Hot
+        );
+    }
+
+    // ---------- LockInfo (T09) ----------
+
+    #[test]
+    fn lock_info_parses_well_formed_json() {
+        let json = r#"{"pid": 12345, "started_at": "2026-05-13T12:00:00Z"}"#;
+        let lock = LockInfo::parse(json).expect("parse");
+        assert_eq!(lock.pid, 12345);
+        assert!(lock.started_at_dt().is_some());
+    }
+
+    #[test]
+    fn lock_info_parse_malformed_returns_none() {
+        assert!(LockInfo::parse("not json").is_none());
+        assert!(LockInfo::parse("{}").is_none()); // missing fields
+    }
+
+    #[test]
+    fn lock_info_is_stale_when_older_than_ttl() {
+        let now = at(2026, 5, 13, 12, 0);
+        let lock = LockInfo {
+            pid: 1,
+            started_at: (now - Duration::seconds(60)).to_rfc3339(),
+        };
+        assert!(lock.is_stale(now, 30));
+    }
+
+    #[test]
+    fn lock_info_is_fresh_within_ttl() {
+        let now = at(2026, 5, 13, 12, 0);
+        let lock = LockInfo {
+            pid: 1,
+            started_at: (now - Duration::seconds(5)).to_rfc3339(),
+        };
+        assert!(!lock.is_stale(now, 30));
+    }
+
+    #[test]
+    fn lock_info_with_malformed_timestamp_is_stale() {
+        let lock = LockInfo {
+            pid: 1,
+            started_at: "garbage".to_string(),
+        };
+        assert!(lock.is_stale(at(2026, 5, 13, 12, 0), 30));
+    }
+
+    #[test]
+    fn classify_future_cached_at_is_hot() {
+        // Defensive: a future timestamp (clock skew) shouldn't classify as stale.
+        let now = at(2026, 5, 13, 12, 0);
+        let cached = (now + Duration::seconds(60)).to_rfc3339();
+        assert_eq!(
+            classify_cache(Some(&cached), now, 180, 1800),
+            CacheState::Hot
+        );
     }
 
     // ---------- cache schema backwards-compat ----------

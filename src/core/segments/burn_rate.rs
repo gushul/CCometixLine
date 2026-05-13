@@ -31,6 +31,40 @@ pub const DEFAULT_MIN_DATA_SECONDS: i64 = 300;
 /// Fewer than 3 turns is also too thin to extrapolate from.
 pub const DEFAULT_MIN_SAMPLES: usize = 3;
 
+/// Which subset of per-turn token counts feeds the burn rate.
+///
+/// `InputOutput` (the default) approximates real quota consumption: Anthropic's
+/// cache reads are very cheap and don't drive the 5h limit, so summing them
+/// inflates the rate by 1-2 orders of magnitude. `OutputOnly` is the strictest
+/// — closest to what actually moves utilization in practice. `Total` preserves
+/// the pre-T11 behavior (input + output + cache_creation + cache_read) for
+/// users who want it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TokenBasis {
+    #[default]
+    InputOutput,
+    OutputOnly,
+    Total,
+}
+
+impl TokenBasis {
+    pub fn from_option_str(s: &str) -> Self {
+        match s {
+            "output_only" | "output" => TokenBasis::OutputOnly,
+            "total" => TokenBasis::Total,
+            _ => TokenBasis::InputOutput,
+        }
+    }
+
+    fn tokens_from(&self, normalized: &crate::config::NormalizedUsage) -> u32 {
+        match self {
+            TokenBasis::InputOutput => normalized.input_tokens + normalized.output_tokens,
+            TokenBasis::OutputOnly => normalized.output_tokens,
+            TokenBasis::Total => normalized.total_for_cost(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BurnSample {
     pub at: DateTime<Utc>,
@@ -87,7 +121,14 @@ pub fn format_burn_rate_display(tokens_per_min: f64) -> String {
 /// Parse a JSONL transcript body into burn samples. Entries without a
 /// timestamp or without normalizable usage are silently dropped — we want to
 /// be permissive against schema drift, not panic.
+///
+/// Uses the default [`TokenBasis::InputOutput`]; callers wanting a different
+/// basis use [`parse_burn_samples_from_jsonl_with`].
 pub fn parse_burn_samples_from_jsonl(content: &str) -> Vec<BurnSample> {
+    parse_burn_samples_from_jsonl_with(content, TokenBasis::default())
+}
+
+pub fn parse_burn_samples_from_jsonl_with(content: &str, basis: TokenBasis) -> Vec<BurnSample> {
     content
         .lines()
         .filter_map(|line| {
@@ -98,7 +139,7 @@ pub fn parse_burn_samples_from_jsonl(content: &str) -> Vec<BurnSample> {
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())?
                 .with_timezone(&Utc);
             let usage: RawUsage = entry.message?.usage?;
-            let tokens = usage.normalize().total_for_cost();
+            let tokens = basis.tokens_from(&usage.normalize());
             if tokens == 0 {
                 return None;
             }
@@ -107,9 +148,9 @@ pub fn parse_burn_samples_from_jsonl(content: &str) -> Vec<BurnSample> {
         .collect()
 }
 
-fn load_burn_samples(path: &Path) -> Vec<BurnSample> {
+fn load_burn_samples(path: &Path, basis: TokenBasis) -> Vec<BurnSample> {
     std::fs::read_to_string(path)
-        .map(|content| parse_burn_samples_from_jsonl(&content))
+        .map(|content| parse_burn_samples_from_jsonl_with(&content, basis))
         .unwrap_or_default()
 }
 
@@ -140,8 +181,13 @@ impl Segment for BurnRateSegment {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
             .unwrap_or(DEFAULT_MIN_SAMPLES);
+        let basis = opts
+            .and_then(|sc| sc.options.get("token_basis"))
+            .and_then(|v| v.as_str())
+            .map(TokenBasis::from_option_str)
+            .unwrap_or_default();
 
-        let samples = load_burn_samples(Path::new(&input.transcript_path));
+        let samples = load_burn_samples(Path::new(&input.transcript_path), basis);
         let rate = compute_burn_rate(
             &samples,
             Utc::now(),
@@ -309,5 +355,55 @@ mod tests {
     #[test]
     fn parse_jsonl_empty_returns_empty() {
         assert_eq!(parse_burn_samples_from_jsonl("").len(), 0);
+    }
+
+    // ---------- T11: token_basis excludes cache reads ----------
+
+    #[test]
+    fn input_output_basis_excludes_cache_reads() {
+        // Real-world shape: tiny actual I/O, huge cache hit.
+        let jsonl = r#"{"type":"assistant","timestamp":"2026-05-13T11:55:00Z","message":{"usage":{"input_tokens":500,"output_tokens":500,"cache_read_input_tokens":100000}}}"#;
+        let samples = parse_burn_samples_from_jsonl_with(jsonl, TokenBasis::InputOutput);
+        assert_eq!(samples.len(), 1);
+        // 500 + 500 = 1000. Cache read (100k) must NOT inflate this.
+        assert_eq!(samples[0].tokens, 1000);
+    }
+
+    #[test]
+    fn output_only_basis_picks_just_output() {
+        let jsonl = r#"{"type":"assistant","timestamp":"2026-05-13T11:55:00Z","message":{"usage":{"input_tokens":500,"output_tokens":300,"cache_read_input_tokens":100000}}}"#;
+        let samples = parse_burn_samples_from_jsonl_with(jsonl, TokenBasis::OutputOnly);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].tokens, 300);
+    }
+
+    #[test]
+    fn total_basis_preserves_legacy_behavior() {
+        let jsonl = r#"{"type":"assistant","timestamp":"2026-05-13T11:55:00Z","message":{"usage":{"input_tokens":500,"output_tokens":500,"cache_read_input_tokens":100000}}}"#;
+        let samples = parse_burn_samples_from_jsonl_with(jsonl, TokenBasis::Total);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].tokens, 101_000);
+    }
+
+    #[test]
+    fn token_basis_from_option_string_round_trips() {
+        assert_eq!(
+            TokenBasis::from_option_str("input_output"),
+            TokenBasis::InputOutput
+        );
+        assert_eq!(
+            TokenBasis::from_option_str("output_only"),
+            TokenBasis::OutputOnly
+        );
+        assert_eq!(
+            TokenBasis::from_option_str("output"),
+            TokenBasis::OutputOnly
+        );
+        assert_eq!(TokenBasis::from_option_str("total"), TokenBasis::Total);
+        // Anything unknown falls back to the (sensible) default.
+        assert_eq!(
+            TokenBasis::from_option_str("garbage"),
+            TokenBasis::InputOutput
+        );
     }
 }

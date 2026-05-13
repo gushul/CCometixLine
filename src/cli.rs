@@ -15,6 +15,12 @@ pub struct Cli {
     /// Patch Claude Code cli.js to disable context warnings
     #[arg(long = "patch")]
     pub patch: Option<String>,
+
+    /// Internal: refresh the usage cache and exit. Used by the statusline as a
+    /// detached subprocess to keep the hot path non-blocking. Not meant for
+    /// direct invocation.
+    #[arg(long = "refresh-usage", hide = true)]
+    pub refresh_usage: bool,
 }
 
 impl Cli {
