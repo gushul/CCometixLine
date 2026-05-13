@@ -273,3 +273,114 @@ impl Segment for UsageSegment {
         SegmentId::Usage
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- get_circle_icon boundaries ----------
+    //
+    // The eight glyphs map to these percent ranges:
+    //   0..=12  → slice_1 (f0a9e)
+    //   13..=25 → slice_2 (f0a9f)
+    //   26..=37 → slice_3 (f0aa0)
+    //   38..=50 → slice_4 (f0aa1)
+    //   51..=62 → slice_5 (f0aa2)
+    //   63..=75 → slice_6 (f0aa3)
+    //   76..=87 → slice_7 (f0aa4)
+    //   88..    → slice_8 (f0aa5)
+    //
+    // Input is utilization in 0.0..=1.0 (the segment passes `seven_day_util / 100.0`).
+
+    #[track_caller]
+    fn assert_icon(util_fraction: f64, expected_codepoint: &str) {
+        let actual = UsageSegment::get_circle_icon(util_fraction);
+        assert_eq!(
+            actual, expected_codepoint,
+            "for utilization {} expected {:?} got {:?}",
+            util_fraction, expected_codepoint, actual
+        );
+    }
+
+    #[test]
+    fn circle_icon_slice_1_low_boundary() {
+        assert_icon(0.0, "\u{f0a9e}");
+        assert_icon(0.12, "\u{f0a9e}");
+    }
+
+    #[test]
+    fn circle_icon_slice_2_boundary() {
+        assert_icon(0.13, "\u{f0a9f}");
+        assert_icon(0.25, "\u{f0a9f}");
+    }
+
+    #[test]
+    fn circle_icon_slice_3_boundary() {
+        assert_icon(0.26, "\u{f0aa0}");
+        assert_icon(0.37, "\u{f0aa0}");
+    }
+
+    #[test]
+    fn circle_icon_slice_4_boundary() {
+        assert_icon(0.38, "\u{f0aa1}");
+        assert_icon(0.50, "\u{f0aa1}");
+    }
+
+    #[test]
+    fn circle_icon_slice_5_boundary() {
+        assert_icon(0.51, "\u{f0aa2}");
+        assert_icon(0.62, "\u{f0aa2}");
+    }
+
+    #[test]
+    fn circle_icon_slice_6_boundary() {
+        assert_icon(0.63, "\u{f0aa3}");
+        assert_icon(0.75, "\u{f0aa3}");
+    }
+
+    #[test]
+    fn circle_icon_slice_7_boundary() {
+        assert_icon(0.76, "\u{f0aa4}");
+        assert_icon(0.87, "\u{f0aa4}");
+    }
+
+    #[test]
+    fn circle_icon_slice_8_high_boundary() {
+        assert_icon(0.88, "\u{f0aa5}");
+        assert_icon(1.00, "\u{f0aa5}");
+    }
+
+    // ---------- format_reset_time ----------
+    //
+    // Note: the function converts to Local timezone, so any test asserting the
+    // exact month/day/hour string is environment-dependent. We pin only the
+    // structural invariants and the None/malformed branches.
+
+    #[test]
+    fn format_reset_time_none_returns_placeholder() {
+        assert_eq!(UsageSegment::format_reset_time(None), "?");
+    }
+
+    #[test]
+    fn format_reset_time_malformed_returns_placeholder() {
+        assert_eq!(UsageSegment::format_reset_time(Some("not a date")), "?");
+        assert_eq!(UsageSegment::format_reset_time(Some("")), "?");
+        assert_eq!(UsageSegment::format_reset_time(Some("2026-13-99")), "?");
+    }
+
+    #[test]
+    fn format_reset_time_valid_rfc3339_has_month_day_hour_shape() {
+        let out = UsageSegment::format_reset_time(Some("2026-05-13T15:30:00Z"));
+        // Format is "{month}-{day}-{hour}" — three dash-separated numeric segments.
+        let parts: Vec<&str> = out.split('-').collect();
+        assert_eq!(parts.len(), 3, "expected 3 parts in {:?}", out);
+        for p in &parts {
+            assert!(
+                p.parse::<u32>().is_ok(),
+                "part {:?} of {:?} is not numeric",
+                p,
+                out
+            );
+        }
+    }
+}

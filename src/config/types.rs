@@ -414,3 +414,168 @@ pub struct TranscriptEntry {
     pub parent_uuid: Option<String>,
     pub summary: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- RawUsage::normalize ----------
+
+    #[test]
+    fn normalize_empty_returns_zeros() {
+        let n = RawUsage::default().normalize();
+        assert_eq!(n.input_tokens, 0);
+        assert_eq!(n.output_tokens, 0);
+        assert_eq!(n.total_tokens, 0);
+        assert_eq!(n.cache_creation_input_tokens, 0);
+        assert_eq!(n.cache_read_input_tokens, 0);
+        assert_eq!(n.context_tokens(), 0);
+        assert_eq!(n.total_for_cost(), 0);
+        assert_eq!(n.display_tokens(), 0);
+    }
+
+    #[test]
+    fn normalize_anthropic_only() {
+        let raw = RawUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            cache_creation_input_tokens: Some(30),
+            cache_read_input_tokens: Some(20),
+            ..Default::default()
+        };
+        let n = raw.normalize();
+        assert_eq!(n.input_tokens, 100);
+        assert_eq!(n.output_tokens, 50);
+        assert_eq!(n.cache_creation_input_tokens, 30);
+        assert_eq!(n.cache_read_input_tokens, 20);
+        assert_eq!(n.context_tokens(), 200);
+        assert_eq!(n.total_for_cost(), 200);
+        assert!(n.calculation_source.contains("total_from_components"));
+    }
+
+    #[test]
+    fn normalize_openai_total_priority() {
+        let raw = RawUsage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: Some(999),
+            ..Default::default()
+        };
+        let n = raw.normalize();
+        assert_eq!(n.input_tokens, 100);
+        assert_eq!(n.output_tokens, 50);
+        // When total is provided directly, it is preferred over the sum.
+        assert_eq!(n.total_tokens, 999);
+        assert!(n.calculation_source.contains("total_tokens_direct"));
+        assert_eq!(n.total_for_cost(), 999);
+    }
+
+    #[test]
+    fn normalize_anthropic_priority_over_openai() {
+        let raw = RawUsage {
+            input_tokens: Some(100),      // Anthropic
+            prompt_tokens: Some(999),     // OpenAI — should be ignored
+            output_tokens: Some(50),      // Anthropic
+            completion_tokens: Some(888), // OpenAI — should be ignored
+            cache_creation_input_tokens: Some(30),
+            cache_creation_prompt_tokens: Some(777),
+            cache_read_input_tokens: Some(20),
+            cache_read_prompt_tokens: Some(666),
+            ..Default::default()
+        };
+        let n = raw.normalize();
+        assert_eq!(n.input_tokens, 100);
+        assert_eq!(n.output_tokens, 50);
+        assert_eq!(n.cache_creation_input_tokens, 30);
+        assert_eq!(n.cache_read_input_tokens, 20);
+    }
+
+    #[test]
+    fn normalize_cached_tokens_fallback_chain() {
+        // Only the deepest fallback — nested prompt_tokens_details.cached_tokens
+        let raw = RawUsage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(42),
+                audio_tokens: None,
+            }),
+            ..Default::default()
+        };
+        let n = raw.normalize();
+        assert_eq!(n.cache_read_input_tokens, 42);
+    }
+
+    #[test]
+    fn normalize_cached_tokens_flat_field_wins_over_nested() {
+        let raw = RawUsage {
+            cached_tokens: Some(100),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(42),
+                audio_tokens: None,
+            }),
+            ..Default::default()
+        };
+        let n = raw.normalize();
+        // cached_tokens (flat) should beat the nested path.
+        assert_eq!(n.cache_read_input_tokens, 100);
+    }
+
+    #[test]
+    fn normalize_records_available_fields() {
+        let raw = RawUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            ..Default::default()
+        };
+        let n = raw.normalize();
+        assert!(n.raw_data_available.contains(&"input_tokens".to_string()));
+        assert!(n.raw_data_available.contains(&"output_tokens".to_string()));
+    }
+
+    // ---------- Config::matches_theme ----------
+
+    #[test]
+    fn default_config_matches_default_theme() {
+        let cfg = Config::default();
+        assert!(cfg.matches_theme("default"));
+        assert!(!cfg.is_modified_from_theme());
+    }
+
+    #[test]
+    fn default_config_does_not_match_cometix_theme() {
+        let cfg = Config::default();
+        assert!(!cfg.matches_theme("cometix"));
+    }
+
+    #[test]
+    fn config_with_dropped_segment_does_not_match() {
+        let mut cfg = Config::default();
+        cfg.segments.pop();
+        assert!(!cfg.matches_theme("default"));
+    }
+
+    #[test]
+    fn config_with_mutated_style_mode_does_not_match() {
+        let mut cfg = Config::default();
+        cfg.style.mode = StyleMode::Powerline;
+        assert!(!cfg.matches_theme("default"));
+        assert!(cfg.is_modified_from_theme());
+    }
+
+    #[test]
+    fn config_with_mutated_separator_does_not_match() {
+        let mut cfg = Config::default();
+        cfg.style.separator = "###".to_string();
+        assert!(!cfg.matches_theme("default"));
+    }
+
+    #[test]
+    fn config_with_disabled_segment_does_not_match() {
+        let mut cfg = Config::default();
+        if let Some(first) = cfg.segments.first_mut() {
+            first.enabled = !first.enabled;
+        }
+        assert!(!cfg.matches_theme("default"));
+    }
+}

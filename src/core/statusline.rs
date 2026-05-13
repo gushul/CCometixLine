@@ -453,6 +453,138 @@ impl StatusLineGenerator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        ColorConfig, IconConfig, SegmentId, StyleConfig, StyleMode, TextStyleConfig,
+    };
+    use std::collections::HashMap;
+
+    // ---------- visible_width ----------
+
+    #[test]
+    fn visible_width_plain_ascii() {
+        assert_eq!(visible_width(""), 0);
+        assert_eq!(visible_width("abc"), 3);
+        assert_eq!(visible_width("hello world"), 11);
+    }
+
+    #[test]
+    fn visible_width_strips_ansi_color() {
+        // \x1b[31mRED\x1b[0m — three visible chars
+        assert_eq!(visible_width("\x1b[31mRED\x1b[0m"), 3);
+    }
+
+    #[test]
+    fn visible_width_multiple_ansi_sequences() {
+        let s = "\x1b[1;38;2;255;0;0mA\x1b[0m\x1b[32mB\x1b[0mC";
+        assert_eq!(visible_width(s), 3);
+    }
+
+    #[test]
+    fn visible_width_only_ansi_no_text() {
+        assert_eq!(visible_width("\x1b[31m\x1b[0m"), 0);
+    }
+
+    #[test]
+    fn visible_width_counts_chars_not_bytes() {
+        // Multi-byte char must count as 1 (function uses .chars().count()).
+        assert_eq!(visible_width("ё"), 1);
+        assert_eq!(visible_width("привет"), 6);
+    }
+
+    // ---------- StatusLineGenerator::generate ----------
+
+    fn synth_segment(id: SegmentId, primary: &str) -> (SegmentConfig, SegmentData) {
+        (
+            SegmentConfig {
+                id,
+                enabled: true,
+                icon: IconConfig {
+                    plain: "x".to_string(),
+                    nerd_font: "x".to_string(),
+                },
+                colors: ColorConfig {
+                    icon: None,
+                    text: None,
+                    background: None,
+                },
+                styles: TextStyleConfig { text_bold: false },
+                options: HashMap::new(),
+            },
+            SegmentData {
+                primary: primary.to_string(),
+                secondary: String::new(),
+                metadata: HashMap::new(),
+            },
+        )
+    }
+
+    fn plain_config(separator: &str) -> Config {
+        Config {
+            style: StyleConfig {
+                mode: StyleMode::Plain,
+                separator: separator.to_string(),
+            },
+            segments: vec![],
+            theme: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn generate_empty_input_returns_empty_string() {
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        assert_eq!(gen.generate(vec![]), "");
+    }
+
+    #[test]
+    fn generate_single_segment_contains_primary() {
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let out = gen.generate(vec![synth_segment(SegmentId::Model, "Opus 4")]);
+        assert!(out.contains("Opus 4"), "output was: {:?}", out);
+        // No separator with a single segment.
+        assert!(!out.contains(" | "), "unexpected separator in: {:?}", out);
+    }
+
+    #[test]
+    fn generate_two_segments_preserves_order_and_separator() {
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let out = gen.generate(vec![
+            synth_segment(SegmentId::Model, "Opus 4"),
+            synth_segment(SegmentId::Directory, "myproj"),
+        ]);
+        let i_first = out.find("Opus 4").expect("first primary missing");
+        let i_second = out.find("myproj").expect("second primary missing");
+        assert!(i_first < i_second, "order broken: {:?}", out);
+        assert!(out.contains(" | "), "separator missing in: {:?}", out);
+        // Separator must sit between the two primaries.
+        let i_sep = out.find(" | ").expect("separator missing");
+        assert!(
+            i_first < i_sep && i_sep < i_second,
+            "separator not between primaries in: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn generate_skips_disabled_segments() {
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let (mut cfg_a, data_a) = synth_segment(SegmentId::Model, "Opus 4");
+        cfg_a.enabled = false;
+        let visible = synth_segment(SegmentId::Directory, "myproj");
+        let out = gen.generate(vec![(cfg_a, data_a), visible]);
+        assert!(
+            !out.contains("Opus 4"),
+            "disabled segment leaked: {:?}",
+            out
+        );
+        assert!(out.contains("myproj"));
+        // Only one visible segment → no separator.
+        assert!(!out.contains(" | "), "spurious separator in: {:?}", out);
+    }
+}
+
 pub fn collect_all_segments(
     config: &Config,
     input: &crate::config::InputData,
