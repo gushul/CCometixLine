@@ -54,6 +54,7 @@ impl SegmentListComponent {
                     SegmentId::ContextWindow => "Context Window",
                     SegmentId::Usage => "Usage",
                     SegmentId::WeeklyUsage => "Weekly Usage",
+                    SegmentId::BurnRate => "Burn Rate",
                     SegmentId::Cost => "Cost",
                     SegmentId::Session => "Session",
                     SegmentId::OutputStyle => "Output Style",

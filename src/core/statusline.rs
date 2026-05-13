@@ -524,6 +524,10 @@ pub fn collect_all_segments(
                 let segment = WeeklyUsageSegment::new();
                 segment.collect(input)
             }
+            crate::config::SegmentId::BurnRate => {
+                let segment = BurnRateSegment::new();
+                segment.collect(input)
+            }
             crate::config::SegmentId::Cost => {
                 let segment = CostSegment::new();
                 segment.collect(input)

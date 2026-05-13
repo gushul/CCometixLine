@@ -146,6 +146,11 @@ impl PreviewComponent {
                     secondary: "· 10-14-0".to_string(),
                     metadata: HashMap::new(),
                 },
+                SegmentId::BurnRate => SegmentData {
+                    primary: "1.2k/m".to_string(),
+                    secondary: String::new(),
+                    metadata: HashMap::new(),
+                },
                 SegmentId::Cost => SegmentData {
                     primary: "$0.02".to_string(),
                     secondary: "".to_string(),

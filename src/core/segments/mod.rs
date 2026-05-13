@@ -1,3 +1,4 @@
+pub mod burn_rate;
 pub mod context_window;
 pub mod cost;
 pub mod directory;
@@ -27,6 +28,7 @@ pub struct SegmentData {
 }
 
 // Re-export all segment types
+pub use burn_rate::BurnRateSegment;
 pub use context_window::ContextWindowSegment;
 pub use cost::CostSegment;
 pub use directory::DirectorySegment;

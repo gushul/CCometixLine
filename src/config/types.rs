@@ -107,6 +107,7 @@ pub enum SegmentId {
     ContextWindow,
     Usage,
     WeeklyUsage,
+    BurnRate,
     Cost,
     Session,
     OutputStyle,
@@ -451,6 +452,11 @@ pub struct TranscriptEntry {
     #[serde(rename = "parentUuid")]
     pub parent_uuid: Option<String>,
     pub summary: Option<String>,
+    /// RFC3339 wall-clock timestamp Claude Code records for each turn.
+    /// Optional because pre-T04 transcripts and synthetic entries may not
+    /// carry it.
+    #[serde(default)]
+    pub timestamp: Option<String>,
 }
 
 #[cfg(test)]
@@ -814,6 +820,36 @@ mod tests {
                 "built-in theme {} is missing the WeeklyUsage segment",
                 name
             );
+        }
+    }
+
+    #[test]
+    fn every_builtin_preset_includes_burn_rate_segment() {
+        use crate::ui::themes::ThemePresets;
+        let configs = [
+            ("cometix", ThemePresets::get_cometix()),
+            ("default", ThemePresets::get_default()),
+            ("minimal", ThemePresets::get_minimal()),
+            ("gruvbox", ThemePresets::get_gruvbox()),
+            ("nord", ThemePresets::get_nord()),
+            ("powerline-dark", ThemePresets::get_powerline_dark()),
+            ("powerline-light", ThemePresets::get_powerline_light()),
+            (
+                "powerline-rose-pine",
+                ThemePresets::get_powerline_rose_pine(),
+            ),
+            (
+                "powerline-tokyo-night",
+                ThemePresets::get_powerline_tokyo_night(),
+            ),
+        ];
+        for (name, cfg) in &configs {
+            let burn = cfg
+                .segments
+                .iter()
+                .find(|s| s.id == SegmentId::BurnRate)
+                .unwrap_or_else(|| panic!("theme {} missing BurnRate", name));
+            assert!(!burn.enabled, "theme {} has BurnRate enabled", name);
         }
     }
 

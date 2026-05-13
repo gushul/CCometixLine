@@ -179,3 +179,39 @@ pub fn weekly_usage_segment() -> SegmentConfig {
     s.enabled = false;
     s
 }
+
+pub fn burn_rate_segment() -> SegmentConfig {
+    // Shared definition reused by every theme — burn rate has no theme-specific
+    // styling for v1. Themes can override later by replacing the entry in
+    // their preset's segments vec.
+    SegmentConfig {
+        id: SegmentId::BurnRate,
+        enabled: false,
+        icon: IconConfig {
+            plain: "🔥".to_string(),
+            nerd_font: "\u{f490}".to_string(),
+        },
+        colors: ColorConfig {
+            icon: Some(AnsiColor::Color16 { c16: 9 }), // bright red
+            text: Some(AnsiColor::Color16 { c16: 9 }),
+            background: None,
+        },
+        styles: TextStyleConfig::default(),
+        options: {
+            let mut opts = HashMap::new();
+            opts.insert(
+                "window_seconds".to_string(),
+                serde_json::Value::Number(900.into()),
+            );
+            opts.insert(
+                "min_data_seconds".to_string(),
+                serde_json::Value::Number(300.into()),
+            );
+            opts.insert(
+                "min_samples".to_string(),
+                serde_json::Value::Number(3.into()),
+            );
+            opts
+        },
+    }
+}
