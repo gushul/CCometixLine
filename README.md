@@ -201,25 +201,149 @@ ccline --patch /path/to/claude-code/cli.js
 ccline --patch ~/.local/share/fnm/node-versions/v24.4.1/installation/lib/node_modules/@anthropic-ai/claude-code/cli.js
 ```
 
-## Default Segments
+## Segments reference
 
-Displays: `Directory | Git Branch Status | Model | Context Window`
+Each segment is a column in the status line. Toggle, recolor, or swap icons in `~/.claude/ccline/config.toml` (per-instance) or `~/.claude/ccline/themes/*.toml` (per-theme). The TUI configurator (`ccline -c`) is the easiest way to edit.
 
-### Git Status Indicators
+| Segment | Icon (plain / nerd font) | Example output | Default | Purpose |
+| --- | --- | --- | --- | --- |
+| **Model** | 🤖 / `` | `Opus 4.7 1M` | enabled | Current Claude model with optional `[1m]` context-modifier suffix |
+| **Directory** | 📁 / `B` | `CCometixLine` | enabled | Workspace basename |
+| **Git** | 🌿 / `2` | `main ✓` or `feat/x ● ↑3` | enabled | Branch + working-tree status |
+| **ContextWindow** | ⚡️ / `` | `49.8% · 498.0k tokens` | enabled | Conversation context usage out of model limit |
+| **Usage** | 8 circle glyphs ([scale](#usage-indicator-scale)) | `26% · 5-13-22` | disabled | Anthropic 5-hour utilization + reset time |
+| **WeeklyUsage** | same 8 circle glyphs | `32% · 5-14-0` | disabled | Anthropic weekly utilization + reset time |
+| **BurnRate** | 🔥 / `` | `1.2k/m` or `—` | disabled | Tokens/minute over recent transcript window |
+| **ProjectedExhaust** | ⏳ / `2` | `~38m`, `@16:42`, `after reset`, `—` | disabled | ETA to 5-hour limit at current rate |
+| **Cost** | 💰 / `` | `$48.45` | disabled | Session cost in USD (from Claude Code) |
+| **Session** | ⏱️ / `B` | `3m45s +156 -23` | disabled | Turn duration + lines added/removed |
+| **OutputStyle** | 🎯 / `5` | `default` | disabled | Active Claude Code `output_style` |
+| **Update** | (varies) | `update available` | not in default themes | Notifies when a newer ccline release exists; add to config manually |
 
-- Branch name with Nerd Font icon
-- Status: `✓` Clean, `●` Dirty, `⚠` Conflicts  
-- Remote tracking: `↑n` Ahead, `↓n` Behind
+Default rendered status line: `🤖 Model | 📁 Directory | 🌿 Git | ⚡️ ContextWindow`. The other segments are opt-in.
 
-### Model Display
+### Git status indicators
 
-Shows simplified Claude model names:
+- Branch name shown with the configured icon.
+- Status: `✓` clean, `●` dirty (uncommitted changes), `⚠` conflicts.
+- Remote tracking: `↑n` n commits ahead of remote, `↓n` n commits behind.
+
+### Model display
+
+Names are simplified for compactness:
+
 - `claude-3-5-sonnet` → `Sonnet 3.5`
 - `claude-4-sonnet` → `Sonnet 4`
+- `claude-opus-4-7` → `Opus 4.7`
 
-### Context Window Display
+Context modifiers (e.g. `[1m]` for the 1-million-token Opus context) are appended as a display suffix — see [Model Configuration](#model-configuration-modelstoml).
 
-Token usage percentage based on transcript analysis with context limit tracking.
+### Context window display
+
+Format: `{percent}% · {tokens}k tokens`. The percent is `used_tokens / model_context_limit` based on the running transcript. When no transcript usage is available yet, the segment shows `- · - tokens`.
+
+### Usage indicator scale
+
+Both **Usage** and **WeeklyUsage** segments key their icon on the current percent. The 8 circle-fill glyphs come from Material Design Icons (Nerd Font):
+
+| Utilization | Glyph | Codepoint |
+| --- | --- | --- |
+| 0–12% | 󰪞 | `E` |
+| 13–25% | 󰪟 | `F` |
+| 26–37% | 󰪠 | `0` |
+| 38–50% | 󰪡 | `1` |
+| 51–62% | 󰪢 | `2` |
+| 63–75% | 󰪣 | `3` |
+| 76–87% | 󰪤 | `4` |
+| 88–100% | 󰪥 | `5` |
+
+Plain (non-Nerd-Font) terminals fall back to `📊` for both segments.
+
+### Color thresholds
+
+Usage and WeeklyUsage primaries change color at configurable thresholds (Burn Rate, ContextWindow and Cost can be wired the same way; see follow-up notes in `docs/tasks/`). Default in every theme:
+
+| Threshold | Color | ANSI |
+| --- | --- | --- |
+| ≥ 60% | yellow | `c16 = 3` |
+| ≥ 85% | red | `c16 = 1` |
+
+Override per segment in `config.toml`:
+
+```toml
+[[segments.usage.options.thresholds]]
+at = 60
+color = { c16 = 3 }              # 16-color yellow
+
+[[segments.usage.options.thresholds]]
+at = 85
+color = { r = 220, g = 60, b = 60 }   # 24-bit RGB
+```
+
+Only the primary text picks up the threshold color — the icon and secondary text keep their configured colors so themes remain recognizable. Threshold lookup reads the segment's `metadata.percent` key, which Usage / WeeklyUsage populate automatically.
+
+### Reset time format
+
+For Usage and WeeklyUsage, the secondary text shows the next reset in `month-day-hour` form in your local timezone (e.g. `5-13-22` = May 13, 22:00 local). If the minute is past 45, the hour rounds up to reflect the next effective boundary.
+
+The format is currently hardcoded; a future task (see `docs/tasks/T15-...md`) makes this configurable (clock-only, relative, ISO, hidden).
+
+### BurnRate `token_basis`
+
+BurnRate sums per-turn tokens from the transcript and divides by the elapsed window. Which token fields are counted is configurable:
+
+```toml
+[segments.burn_rate.options]
+token_basis = "input_output"   # default — input + output tokens
+# token_basis = "output_only"  # output_only — strictest; closest to what moves the 5h quota
+# token_basis = "total"        # legacy — input + output + cache_creation + cache_read
+window_seconds = 900           # sliding window (default 15 min)
+min_data_seconds = 300         # need ≥ 5 min of data before showing a rate
+min_samples = 3                # need ≥ 3 turns in window
+```
+
+`"total"` is the pre-T11 behavior; in practice it inflates the displayed rate by 1–2 orders of magnitude because Anthropic's cache reads (50–200k tokens per turn) don't actually drive the 5h limit. Stick with the default `"input_output"` unless you have a reason.
+
+When data is too thin (cold session, fewer than `min_samples` turns, or under `min_data_seconds` of elapsed time), the segment displays `—`.
+
+### ProjectedExhaust modes
+
+ProjectedExhaust projects when the 5-hour utilization will hit 100% at the current rate, using the **change in utilization** between two cache snapshots (independent of BurnRate).
+
+```toml
+[segments.projected_exhaust.options]
+format = "duration"            # ~38m, ~2h15m, <1m
+# format = "clock"             # @16:42 in local time
+min_history_seconds = 300      # need ≥ 5 min between snapshots to project
+```
+
+Outcomes:
+
+- `~38m` / `~2h15m` — projected time to exhaust.
+- `@16:42` — projected clock time (when `format = "clock"`).
+- `after reset` — at this rate, the window resets before you exhaust it.
+- `—` — not enough history yet, or utilization didn't grow between snapshots (idle / just past a reset).
+
+The "two snapshots" come from the SWR cache history (rotated automatically on every refresh). On a fresh install, the segment renders `—` until the second background refresh completes — usually within a minute.
+
+### SWR cache behavior
+
+The Usage / WeeklyUsage / ProjectedExhaust segments share a single on-disk cache at `~/.claude/ccline/.api_usage_cache.json`. Status-line renders never block on network: a detached `ccline --refresh-usage` subprocess does the fetch when the cache is stale.
+
+```toml
+[segments.usage.options]
+cache_duration = 180             # hot window — serve, no refresh (default 180s)
+revalidate_after_seconds = 1800  # past this, segment hides until refresh completes
+```
+
+| Age of cache | State | Behavior |
+| --- | --- | --- |
+| `< cache_duration` | Hot | Serve immediately, no refresh. |
+| `cache_duration ≤ age < revalidate_after_seconds` | SoftStale | Serve immediately + spawn background refresh. |
+| `≥ revalidate_after_seconds` | HardStale | Segment hides, spawn refresh. |
+| no file yet | Cold | Segment hides, spawn refresh. |
+
+Concurrent renders fan out to a single refresh subprocess via the `~/.claude/ccline/.usage_refresh.lock` file (cleaned up after 30s if the holder dies).
 
 ## Configuration
 
@@ -232,13 +356,7 @@ CCometixLine supports full configuration via TOML files and interactive TUI:
 
 ### Available Segments
 
-All segments are configurable with:
-- Enable/disable toggle
-- Custom separators and icons
-- Color customization
-- Format options
-
-Supported segments: Directory, Git, Model, Usage, WeeklyUsage, BurnRate, ProjectedExhaust, Time, Cost, OutputStyle
+All segments support enable/disable toggles, custom icons and colors, and per-segment options. See the [Segments reference](#segments-reference) above for icons, options, and outputs.
 
 ### Model Configuration (`models.toml`)
 
