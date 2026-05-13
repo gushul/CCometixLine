@@ -219,13 +219,14 @@ pub fn burn_rate_segment() -> SegmentConfig {
 pub fn projected_exhaust_segment() -> SegmentConfig {
     // Shared definition reused by every theme. v1 ships with no theme-specific
     // styling — themes can override later by replacing the entry in their
-    // preset vec.
+    // preset vec. Hourglass icon is visually distinct from Session's stopwatch
+    // and semantically matches "time running out in the current window".
     SegmentConfig {
         id: SegmentId::ProjectedExhaust,
         enabled: false,
         icon: IconConfig {
-            plain: "⏱".to_string(),
-            nerd_font: "\u{f520}".to_string(),
+            plain: "⏳".to_string(),
+            nerd_font: "\u{f0ea2}".to_string(), // timer-sand (Material Design)
         },
         colors: ColorConfig {
             icon: Some(AnsiColor::Color16 { c16: 11 }), // bright yellow
