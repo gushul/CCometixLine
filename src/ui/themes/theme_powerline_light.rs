@@ -246,6 +246,13 @@ pub fn usage_segment() -> SegmentConfig {
                 serde_json::Value::Number(180.into()),
             );
             opts.insert("timeout".to_string(), serde_json::Value::Number(2.into()));
+            opts.insert(
+                "thresholds".to_string(),
+                serde_json::json!([
+                    {"at": 60, "color": {"c16": 3}},
+                    {"at": 85, "color": {"c16": 1}},
+                ]),
+            );
             opts
         },
     }

@@ -1,4 +1,4 @@
-use crate::config::{AnsiColor, Config, SegmentConfig, StyleMode};
+use crate::config::{AnsiColor, Config, SegmentConfig, StyleMode, Threshold};
 use crate::core::segments::SegmentData;
 
 /// Strip ANSI escape sequences and return visible text length
@@ -220,6 +220,11 @@ impl StatusLineGenerator {
             self.get_icon(config)
         };
 
+        // Threshold-derived color overrides `colors.text` for the primary
+        // string only; secondary text + icon keep their configured colors so
+        // themes stay recognizable.
+        let primary_color = self.effective_primary_color(config, data);
+
         // Apply background color to the entire segment if set
         if let Some(bg_color) = &config.colors.background {
             let bg_code = self.apply_background_color(bg_color);
@@ -235,7 +240,7 @@ impl StatusLineGenerator {
             let text_styled = self
                 .apply_style(
                     &data.primary,
-                    config.colors.text.as_ref(),
+                    primary_color.as_ref(),
                     config.styles.text_bold,
                 )
                 .replace("\x1b[0m", "");
@@ -260,7 +265,7 @@ impl StatusLineGenerator {
             let icon_colored = self.apply_color(&icon, config.colors.icon.as_ref());
             let text_styled = self.apply_style(
                 &data.primary,
-                config.colors.text.as_ref(),
+                primary_color.as_ref(),
                 config.styles.text_bold,
             );
 
@@ -279,6 +284,28 @@ impl StatusLineGenerator {
 
             segment
         }
+    }
+
+    /// Returns the color to apply to the segment's primary text. Picks a
+    /// threshold-derived color when the segment publishes a `percent`
+    /// metadata key and a configured threshold matches; otherwise falls back
+    /// to the segment's configured `colors.text`.
+    fn effective_primary_color(
+        &self,
+        config: &SegmentConfig,
+        data: &SegmentData,
+    ) -> Option<AnsiColor> {
+        let thresholds = Threshold::list_from_options(&config.options);
+        if !thresholds.is_empty() {
+            if let Some(pct_str) = data.metadata.get("percent") {
+                if let Ok(percent) = pct_str.parse::<f64>() {
+                    if let Some(t) = Threshold::pick(&thresholds, percent) {
+                        return Some(t.color.clone());
+                    }
+                }
+            }
+        }
+        config.colors.text.clone()
     }
 
     fn get_icon(&self, config: &SegmentConfig) -> String {
@@ -633,6 +660,172 @@ mod tests {
         assert!(
             i_first < i_sep && i_sep < i_second,
             "separator not between primaries in: {:?}",
+            out
+        );
+    }
+
+    // ---------- T03: threshold-based color override ----------
+
+    fn segment_with_thresholds(
+        primary: &str,
+        percent: &str,
+        thresholds: serde_json::Value,
+    ) -> (SegmentConfig, SegmentData) {
+        let mut opts = HashMap::new();
+        opts.insert("thresholds".to_string(), thresholds);
+        let cfg = SegmentConfig {
+            id: SegmentId::Usage,
+            enabled: true,
+            icon: IconConfig {
+                plain: "x".to_string(),
+                nerd_font: "x".to_string(),
+            },
+            colors: ColorConfig {
+                icon: None,
+                text: None,
+                background: None,
+            },
+            styles: TextStyleConfig::default(),
+            options: opts,
+        };
+        let mut meta = HashMap::new();
+        meta.insert("percent".to_string(), percent.to_string());
+        let data = SegmentData {
+            primary: primary.to_string(),
+            secondary: String::new(),
+            metadata: meta,
+        };
+        (cfg, data)
+    }
+
+    #[test]
+    fn threshold_overrides_primary_color_when_percent_meets_threshold() {
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let (cfg, data) = segment_with_thresholds(
+            "70%",
+            "70.0",
+            serde_json::json!([{ "at": 60, "color": { "c16": 3 } }]),
+        );
+        let out = gen.generate(vec![(cfg, data)]);
+        // c16=3 maps to foreground code 33 ("\x1b[33m").
+        assert!(
+            out.contains("\x1b[33m"),
+            "expected yellow code in output: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn threshold_does_not_apply_when_percent_below_all() {
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let (cfg, data) = segment_with_thresholds(
+            "30%",
+            "30.0",
+            serde_json::json!([{ "at": 60, "color": { "c16": 3 } }]),
+        );
+        let out = gen.generate(vec![(cfg, data)]);
+        assert!(
+            !out.contains("\x1b[33m"),
+            "yellow leaked for percent below threshold: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn threshold_picks_highest_matching_color() {
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let (cfg, data) = segment_with_thresholds(
+            "90%",
+            "90.0",
+            serde_json::json!([
+                { "at": 60, "color": { "c16": 3 } },  // yellow → \x1b[33m
+                { "at": 85, "color": { "c16": 1 } },  // red    → \x1b[31m
+            ]),
+        );
+        let out = gen.generate(vec![(cfg, data)]);
+        assert!(out.contains("\x1b[31m"), "red expected: {:?}", out);
+        assert!(
+            !out.contains("\x1b[33m"),
+            "yellow must not also fire when red matches: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn threshold_ignored_when_metadata_percent_missing() {
+        // Segment has thresholds but never published a percent metadata key.
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let mut opts = HashMap::new();
+        opts.insert(
+            "thresholds".to_string(),
+            serde_json::json!([{ "at": 60, "color": { "c16": 3 } }]),
+        );
+        let cfg = SegmentConfig {
+            id: SegmentId::Usage,
+            enabled: true,
+            icon: IconConfig {
+                plain: "x".to_string(),
+                nerd_font: "x".to_string(),
+            },
+            colors: ColorConfig {
+                icon: None,
+                text: None,
+                background: None,
+            },
+            styles: TextStyleConfig::default(),
+            options: opts,
+        };
+        let data = SegmentData {
+            primary: "anything".to_string(),
+            secondary: String::new(),
+            metadata: HashMap::new(),
+        };
+        let out = gen.generate(vec![(cfg, data)]);
+        assert!(!out.contains("\x1b[33m"));
+    }
+
+    #[test]
+    fn threshold_does_not_color_the_icon() {
+        // Configure an icon color AND a threshold color. The icon must keep
+        // its configured color (cyan, c16=14 → 96) and only the primary text
+        // should pick up the threshold color (yellow, 33).
+        let gen = StatusLineGenerator::new(plain_config(" | "));
+        let mut opts = HashMap::new();
+        opts.insert(
+            "thresholds".to_string(),
+            serde_json::json!([{ "at": 60, "color": { "c16": 3 } }]),
+        );
+        let cfg = SegmentConfig {
+            id: SegmentId::Usage,
+            enabled: true,
+            icon: IconConfig {
+                plain: "ICON".to_string(),
+                nerd_font: "ICON".to_string(),
+            },
+            colors: ColorConfig {
+                icon: Some(AnsiColor::Color16 { c16: 14 }), // cyan → \x1b[96m
+                text: Some(AnsiColor::Color16 { c16: 7 }),  // gray → \x1b[37m
+                background: None,
+            },
+            styles: TextStyleConfig::default(),
+            options: opts,
+        };
+        let mut meta = HashMap::new();
+        meta.insert("percent".to_string(), "75.0".to_string());
+        let data = SegmentData {
+            primary: "75%".to_string(),
+            secondary: String::new(),
+            metadata: meta,
+        };
+        let out = gen.generate(vec![(cfg, data)]);
+        // Icon's configured cyan color must still be present.
+        assert!(out.contains("\x1b[96m"), "icon color lost: {:?}", out);
+        // Threshold yellow applied to the primary text.
+        assert!(out.contains("\x1b[33m"), "threshold not applied: {:?}", out);
+        // Original gray text color (37) must NOT have rendered.
+        assert!(
+            !out.contains("\x1b[37m"),
+            "configured text color leaked alongside threshold: {:?}",
             out
         );
     }

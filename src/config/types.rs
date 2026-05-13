@@ -61,6 +61,43 @@ pub enum AnsiColor {
     Rgb { r: u8, g: u8, b: u8 },
 }
 
+/// Color threshold for percent-bearing segments.
+///
+/// Stored inside `SegmentConfig.options` under the `"thresholds"` key as an
+/// array of `{at, color}` objects. The renderer picks the highest `at` that
+/// is `<= percent` (per `Threshold::pick`) and uses its color to override the
+/// segment's primary text color.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Threshold {
+    /// Percent threshold (0..=100). Inclusive lower bound.
+    pub at: u8,
+    /// Color applied to the segment's primary text when the percent reaches
+    /// `at` and no higher threshold matches.
+    pub color: AnsiColor,
+}
+
+impl Threshold {
+    /// Pull `Vec<Threshold>` out of a segment's `options` map. Returns empty
+    /// when the key is absent or malformed — color thresholds are an opt-in
+    /// feature and bad config should be ignored, not propagated as errors.
+    pub fn list_from_options(options: &HashMap<String, serde_json::Value>) -> Vec<Threshold> {
+        options
+            .get("thresholds")
+            .and_then(|v| serde_json::from_value::<Vec<Threshold>>(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Pick the threshold whose `at` is the highest value `<= percent`.
+    /// Returns `None` when `percent` is below every threshold's `at`,
+    /// signalling "no color override".
+    pub fn pick(thresholds: &[Threshold], percent: f64) -> Option<&Threshold> {
+        thresholds
+            .iter()
+            .filter(|t| (t.at as f64) <= percent)
+            .max_by_key(|t| t.at)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SegmentId {
@@ -554,6 +591,153 @@ mod tests {
         let cfg_ids: Vec<_> = cfg.segments.iter().map(|s| s.id).collect();
         let built_in_ids: Vec<_> = built_in.segments.iter().map(|s| s.id).collect();
         assert_eq!(cfg_ids, built_in_ids);
+    }
+
+    // ---------- Threshold (T03) ----------
+
+    #[test]
+    fn threshold_list_from_options_reads_array() {
+        let json = serde_json::json!({
+            "thresholds": [
+                { "at": 60, "color": { "c16": 3 } },
+                { "at": 85, "color": { "r": 220, "g": 60, "b": 60 } }
+            ]
+        });
+        let opts: HashMap<String, serde_json::Value> = serde_json::from_value(json).unwrap();
+        let thresholds = Threshold::list_from_options(&opts);
+        assert_eq!(thresholds.len(), 2);
+        assert_eq!(thresholds[0].at, 60);
+        assert_eq!(thresholds[1].at, 85);
+        assert!(matches!(thresholds[0].color, AnsiColor::Color16 { c16: 3 }));
+        assert!(matches!(
+            thresholds[1].color,
+            AnsiColor::Rgb {
+                r: 220,
+                g: 60,
+                b: 60
+            }
+        ));
+    }
+
+    #[test]
+    fn threshold_list_from_options_missing_returns_empty() {
+        let empty: HashMap<String, serde_json::Value> = HashMap::new();
+        assert!(Threshold::list_from_options(&empty).is_empty());
+    }
+
+    #[test]
+    fn threshold_list_from_options_garbage_returns_empty() {
+        let mut bogus: HashMap<String, serde_json::Value> = HashMap::new();
+        bogus.insert("thresholds".to_string(), serde_json::json!("not an array"));
+        assert!(Threshold::list_from_options(&bogus).is_empty());
+    }
+
+    #[test]
+    fn threshold_pick_below_all_returns_none() {
+        let ts = vec![
+            Threshold {
+                at: 60,
+                color: AnsiColor::Color16 { c16: 3 },
+            },
+            Threshold {
+                at: 85,
+                color: AnsiColor::Color16 { c16: 1 },
+            },
+        ];
+        assert!(Threshold::pick(&ts, 30.0).is_none());
+        assert!(Threshold::pick(&ts, 59.99).is_none());
+    }
+
+    #[test]
+    fn threshold_pick_returns_highest_at_or_below() {
+        let ts = vec![
+            Threshold {
+                at: 60,
+                color: AnsiColor::Color16 { c16: 3 },
+            },
+            Threshold {
+                at: 85,
+                color: AnsiColor::Color16 { c16: 1 },
+            },
+        ];
+        assert_eq!(Threshold::pick(&ts, 60.0).map(|t| t.at), Some(60));
+        assert_eq!(Threshold::pick(&ts, 70.0).map(|t| t.at), Some(60));
+        assert_eq!(Threshold::pick(&ts, 85.0).map(|t| t.at), Some(85));
+        assert_eq!(Threshold::pick(&ts, 99.9).map(|t| t.at), Some(85));
+    }
+
+    #[test]
+    fn every_builtin_preset_ships_with_default_thresholds_on_usage() {
+        use crate::ui::themes::ThemePresets;
+        let configs = [
+            ("cometix", ThemePresets::get_cometix()),
+            ("default", ThemePresets::get_default()),
+            ("minimal", ThemePresets::get_minimal()),
+            ("gruvbox", ThemePresets::get_gruvbox()),
+            ("nord", ThemePresets::get_nord()),
+            ("powerline-dark", ThemePresets::get_powerline_dark()),
+            ("powerline-light", ThemePresets::get_powerline_light()),
+            (
+                "powerline-rose-pine",
+                ThemePresets::get_powerline_rose_pine(),
+            ),
+            (
+                "powerline-tokyo-night",
+                ThemePresets::get_powerline_tokyo_night(),
+            ),
+        ];
+        for (name, cfg) in &configs {
+            let usage = cfg
+                .segments
+                .iter()
+                .find(|s| s.id == SegmentId::Usage)
+                .expect("usage segment missing");
+            let ts = Threshold::list_from_options(&usage.options);
+            assert_eq!(ts.len(), 2, "theme {} should ship 60/85 thresholds", name);
+            let ats: Vec<u8> = ts.iter().map(|t| t.at).collect();
+            assert!(
+                ats.contains(&60) && ats.contains(&85),
+                "theme {} thresholds not 60/85: {:?}",
+                name,
+                ats
+            );
+        }
+    }
+
+    #[test]
+    fn weekly_usage_inherits_thresholds_from_usage_via_wrapper() {
+        use crate::ui::themes::ThemePresets;
+        // WeeklyUsage segments are built as `{ let mut s = usage_segment(); ... }`
+        // so they share the options HashMap and inherit thresholds for free.
+        let cfg = ThemePresets::get_default();
+        let weekly = cfg
+            .segments
+            .iter()
+            .find(|s| s.id == SegmentId::WeeklyUsage)
+            .expect("WeeklyUsage missing");
+        let ts = Threshold::list_from_options(&weekly.options);
+        assert_eq!(
+            ts.len(),
+            2,
+            "weekly_usage didn't inherit thresholds: options keys = {:?}",
+            weekly.options.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn threshold_pick_unsorted_input_still_returns_max() {
+        // The helper must tolerate user-provided thresholds in any order.
+        let ts = vec![
+            Threshold {
+                at: 85,
+                color: AnsiColor::Color16 { c16: 1 },
+            },
+            Threshold {
+                at: 60,
+                color: AnsiColor::Color16 { c16: 3 },
+            },
+        ];
+        assert_eq!(Threshold::pick(&ts, 90.0).map(|t| t.at), Some(85));
     }
 
     #[test]

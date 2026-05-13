@@ -155,7 +155,10 @@ pub fn format_segment_data(util_percent: f64, resets_at: Option<&str>) -> Segmen
         "dynamic_icon".to_string(),
         get_circle_icon(util_percent / 100.0),
     );
-    metadata.insert("utilization".to_string(), util_percent.to_string());
+    // Generic key used by threshold rendering. Specific keys (like
+    // `five_hour_utilization`, `seven_day_utilization`) are added by callers
+    // when they want to expose both windows for hook consumers.
+    metadata.insert("percent".to_string(), util_percent.to_string());
 
     SegmentData {
         primary,
@@ -378,7 +381,7 @@ mod tests {
         assert!(data.metadata.contains_key("dynamic_icon"));
         // 67% → slice_6 (range 63..=75) → f0aa3
         assert_eq!(data.metadata.get("dynamic_icon").unwrap(), "\u{f0aa3}");
-        assert_eq!(data.metadata.get("utilization").unwrap(), "67");
+        assert_eq!(data.metadata.get("percent").unwrap(), "67");
     }
 
     #[test]
