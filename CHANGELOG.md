@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-14
+
+### Added
+
+- **burn-rate**: Tokens/min from transcript sliding window (T04)
+- **hooks**: Per-model breakdown + .limits_state.json (T06, T07)
+- **projected-exhaust**: 5h-window exhaust projection (T05)
+- **reset-time**: Configurable format (clock/relative/iso/hidden) (T15)
+- **thresholds**: Per-segment color thresholds with 60/85 defaults (T03)
+- **usage**: Widen response schema with serde flatten extra (T01)
+- **usage-api**: Stale-while-revalidate cache + --refresh-usage subprocess (T09, T11)
+- **usage-history**: Append-only JSONL + --stats CLI (T08)
+- **weekly-usage**: Add WeeklyUsage segment + shared usage_api helper (T02)
+- **weekly-usage**: Week-over-week trend indicator (T10)
+
+
+### Documentation
+
+- **readme**: Full segments reference + documentation discipline rule (T13, T14)
+
+
+### Fixed
+
+- **projected-exhaust**: Swap icon to hourglass to avoid Session collision (T12)
+- **usage-api**: Child overwrites lock instead of bailing (T09-fix)
+
+
+### Testing
+
+
+- Pin existing pure helpers + clippy lints fix (T00)
+
 ## [1.1.2] - 2026-03-15
 
 ### Changed
