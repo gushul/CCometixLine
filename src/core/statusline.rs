@@ -634,6 +634,7 @@ mod tests {
             },
             segments: vec![],
             theme: "test".to_string(),
+            statusline: crate::config::StatuslineConfig::default(),
         }
     }
 

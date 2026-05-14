@@ -251,6 +251,24 @@ pub fn format_trend_arrow(current: f64, past: f64) -> String {
     }
 }
 
+/// Build a `S X% O Y%` compact per-model breakdown. Returns `None` when both
+/// are absent (no useful info to render). `—` is used for an absent half when
+/// only one is known. Pure.
+pub fn format_per_model_breakdown(sonnet: Option<f64>, opus: Option<f64>) -> Option<String> {
+    if sonnet.is_none() && opus.is_none() {
+        return None;
+    }
+    let s = match sonnet {
+        Some(v) => format!("{:.0}%", v),
+        None => "—".to_string(),
+    };
+    let o = match opus {
+        Some(v) => format!("{:.0}%", v),
+        None => "—".to_string(),
+    };
+    Some(format!("S {} O {}", s, o))
+}
+
 /// Render the summary as one JSON object (single line, no trailing newline).
 pub fn format_stats_json(stats: &Stats) -> String {
     serde_json::json!({
@@ -555,6 +573,45 @@ mod tests {
         // 8.7 rounds via :.0 format → 9
         let s = format_trend_arrow(38.7, 30.0);
         assert_eq!(s, "↑ 9%");
+    }
+
+    // ---- format_per_model_breakdown (T06) ----
+
+    #[test]
+    fn breakdown_both_present() {
+        assert_eq!(
+            format_per_model_breakdown(Some(4.0), Some(12.0)),
+            Some("S 4% O 12%".to_string())
+        );
+    }
+
+    #[test]
+    fn breakdown_only_sonnet() {
+        assert_eq!(
+            format_per_model_breakdown(Some(4.0), None),
+            Some("S 4% O —".to_string())
+        );
+    }
+
+    #[test]
+    fn breakdown_only_opus() {
+        assert_eq!(
+            format_per_model_breakdown(None, Some(15.0)),
+            Some("S — O 15%".to_string())
+        );
+    }
+
+    #[test]
+    fn breakdown_neither_returns_none() {
+        assert_eq!(format_per_model_breakdown(None, None), None);
+    }
+
+    #[test]
+    fn breakdown_rounds_to_whole_percent() {
+        assert_eq!(
+            format_per_model_breakdown(Some(3.4), Some(11.6)),
+            Some("S 3% O 12%".to_string())
+        );
     }
 
     #[test]

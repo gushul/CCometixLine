@@ -89,11 +89,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Collect segment data
     let segments_data = collect_all_segments(&config, &input);
 
+    // T07: emit limits-state sidecar for SessionStart hooks etc. Captures
+    // the threshold level (ok/warn/critical) for both 5h and weekly windows.
+    let exit_code_enabled = config.statusline.exit_code_on_threshold;
+    let state = ccometixline::utils::limit_signals::write_state(&config, &segments_data);
+
     // Render statusline
     let generator = StatusLineGenerator::new(config);
     let statusline = generator.generate(segments_data);
 
     println!("{}", statusline);
+
+    // Optional exit-code mode: surface the worst limit level as a non-zero
+    // exit code so Claude Code (or any other hook consumer) can react. Off
+    // by default since most users don't expect ccline to "fail".
+    if exit_code_enabled {
+        use ccometixline::utils::limit_signals::{worst_level, Level};
+        match worst_level(&state) {
+            Level::Critical => std::process::exit(2),
+            Level::Warn => std::process::exit(1),
+            Level::Ok => {}
+        }
+    }
 
     Ok(())
 }

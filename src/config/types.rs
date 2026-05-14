@@ -7,6 +7,22 @@ pub struct Config {
     pub style: StyleConfig,
     pub segments: Vec<SegmentConfig>,
     pub theme: String,
+    /// Top-level statusline behavior — global knobs that don't belong on any
+    /// single segment. Defaults via `#[serde(default)]` for back-compat with
+    /// pre-T07 config files.
+    #[serde(default)]
+    pub statusline: StatuslineConfig,
+}
+
+/// Top-level statusline configuration (T07).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StatuslineConfig {
+    /// When true, ccline exits with code 1 on `warn` level or 2 on `critical`
+    /// level after rendering. The status line still prints normally — the
+    /// exit code is just a side-channel signal that Claude Code hooks may
+    /// interpret. Default false (most users should leave this off).
+    #[serde(default)]
+    pub exit_code_on_threshold: bool,
 }
 
 // Default implementation moved to ui/themes/presets.rs

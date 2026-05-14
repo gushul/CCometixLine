@@ -99,13 +99,20 @@ pub fn classify_cache(
 
 /// Parsed response from `GET /api/oauth/usage`.
 ///
-/// Only the two historically-known periods are named; everything else
-/// (per-model weekly windows, internal feature-flag slots) falls through to
-/// `extra` so feature work can introspect without a schema bump.
+/// Named fields are the ones we render; `extra` keeps everything else
+/// (internal feature-flag slots, future fields) for forward compatibility.
 #[derive(Debug, Deserialize)]
 pub struct ApiUsageResponse {
     pub five_hour: UsagePeriod,
     pub seven_day: UsagePeriod,
+    /// Per-model weekly window for Sonnet. `null` from the API when the
+    /// account hasn't used Sonnet in the window. Confirmed real via T01's
+    /// probe; lifted out of `extra` in T06.
+    #[serde(default)]
+    pub seven_day_sonnet: Option<UsagePeriod>,
+    /// Per-model weekly window for Opus. `null` from the API when unused.
+    #[serde(default)]
+    pub seven_day_opus: Option<UsagePeriod>,
     #[serde(flatten)]
     #[allow(dead_code)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -121,8 +128,8 @@ pub struct UsagePeriod {
 }
 
 /// On-disk cache shape. Backwards-compatible with prior layouts: legacy
-/// caches without `five_hour_resets_at` or the T05 `previous_*` fields still
-/// parse — every additive field is `#[serde(default)]`.
+/// caches without `five_hour_resets_at`, T05 `previous_*`, or T06
+/// per-model fields still parse — every additive field is `#[serde(default)]`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiUsageCache {
     pub five_hour_utilization: f64,
@@ -139,6 +146,13 @@ pub struct ApiUsageCache {
     pub previous_five_hour_utilization: Option<f64>,
     #[serde(default)]
     pub previous_cached_at: Option<String>,
+    /// Per-model weekly utilization. `None` either because the API returned
+    /// `null` (account unused on that model) or because the cache predates
+    /// T06.
+    #[serde(default)]
+    pub seven_day_sonnet_utilization: Option<f64>,
+    #[serde(default)]
+    pub seven_day_opus_utilization: Option<f64>,
 }
 
 impl ApiUsageCache {
@@ -150,7 +164,8 @@ impl ApiUsageCache {
 /// A snapshot of both utilization windows + their reset times, used by
 /// segments to pick the value they want to render. T05 also surfaces the
 /// previous five-hour reading so it can compute a projection without
-/// re-reading the cache.
+/// re-reading the cache. T06 adds per-model weekly utilizations (Sonnet /
+/// Opus) for the breakdown display.
 #[derive(Debug, Clone)]
 pub struct UsageSnapshot {
     pub five_hour_utilization: f64,
@@ -159,6 +174,8 @@ pub struct UsageSnapshot {
     pub seven_day_resets_at: Option<String>,
     pub previous_five_hour_utilization: Option<f64>,
     pub previous_cached_at: Option<String>,
+    pub seven_day_sonnet_utilization: Option<f64>,
+    pub seven_day_opus_utilization: Option<f64>,
 }
 
 /// Stale-while-revalidate hot path. Never blocks on network.
@@ -214,6 +231,8 @@ fn cache_to_snapshot(c: ApiUsageCache) -> UsageSnapshot {
         seven_day_resets_at: c.resets_at.clone(),
         previous_five_hour_utilization: c.previous_five_hour_utilization,
         previous_cached_at: c.previous_cached_at,
+        seven_day_sonnet_utilization: c.seven_day_sonnet_utilization,
+        seven_day_opus_utilization: c.seven_day_opus_utilization,
     }
 }
 
@@ -333,6 +352,8 @@ fn refresh_inner() -> Result<(), String> {
         cached_at: now.to_rfc3339(),
         previous_five_hour_utilization: previous_util,
         previous_cached_at: previous_at,
+        seven_day_sonnet_utilization: response.seven_day_sonnet.as_ref().map(|p| p.utilization),
+        seven_day_opus_utilization: response.seven_day_opus.as_ref().map(|p| p.utilization),
     };
     save_cache(&cache);
 
@@ -805,6 +826,8 @@ mod tests {
             cached_at: "now".into(),
             previous_five_hour_utilization: Some(20.0),
             previous_cached_at: Some("earlier".into()),
+            seven_day_sonnet_utilization: Some(4.0),
+            seven_day_opus_utilization: None,
         };
         let json = serde_json::to_string(&cache).unwrap();
         let parsed: ApiUsageCache = serde_json::from_str(&json).unwrap();
@@ -815,6 +838,8 @@ mod tests {
         );
         assert_eq!(parsed.previous_five_hour_utilization, Some(20.0));
         assert_eq!(parsed.previous_cached_at.as_deref(), Some("earlier"));
+        assert_eq!(parsed.seven_day_sonnet_utilization, Some(4.0));
+        assert!(parsed.seven_day_opus_utilization.is_none());
     }
 
     #[test]
@@ -864,7 +889,11 @@ mod tests {
         let parsed: ApiUsageResponse = serde_json::from_str(sample).unwrap();
         assert_eq!(parsed.five_hour.utilization, 22.0);
         assert_eq!(parsed.seven_day.utilization, 26.0);
-        assert!(parsed.extra.contains_key("seven_day_sonnet"));
-        assert!(parsed.extra.contains_key("seven_day_opus"));
+        // T06: per-model weekly fields are now named (lifted out of `extra`).
+        assert_eq!(parsed.seven_day_sonnet.as_ref().unwrap().utilization, 4.0);
+        assert!(parsed.seven_day_opus.is_none()); // null in the sample
+                                                  // Other unfamiliar keys still land in `extra` for forward compat.
+        assert!(parsed.extra.contains_key("seven_day_omelette"));
+        assert!(parsed.extra.contains_key("extra_usage"));
     }
 }

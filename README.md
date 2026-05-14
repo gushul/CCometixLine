@@ -191,6 +191,61 @@ ccline --theme powerline-dark
 ccline --theme my-custom-theme
 ```
 
+### Threshold hooks (`.limits_state.json`)
+
+On every successful render, ccline writes a tiny sidecar JSON file to `~/.claude/ccline/.limits_state.json` summarizing the threshold level of each usage window. External tooling — typically a Claude Code `SessionStart` hook — reads it to decide whether to warn the user, switch model, etc.
+
+Shape:
+
+```json
+{
+  "updated_at": "2026-05-13T20:14:32Z",
+  "five_hour": { "percent": 73, "level": "warn" },
+  "weekly":    { "percent": 91, "level": "critical" }
+}
+```
+
+Levels are derived from the same `[[options.thresholds]]` config that drives the visible color in the status line (see [Color thresholds](#color-thresholds)) — single source of truth:
+
+- `ok` — below the lowest threshold.
+- `warn` — crossed any threshold but not the highest.
+- `critical` — at or past the highest threshold.
+
+Either window field may be `null` when the segment had no usable data (cold cache, no metadata).
+
+**Example SessionStart hook** (`~/.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "command": "~/.claude/ccline/limits-guard.sh" }
+    ]
+  }
+}
+```
+
+`limits-guard.sh`:
+
+```bash
+#!/bin/bash
+state=~/.claude/ccline/.limits_state.json
+[ -f "$state" ] || exit 0
+level=$(jq -r '.weekly.level // "ok"' "$state")
+if [ "$level" = "critical" ]; then
+  echo "⚠️  Weekly limit at $(jq -r '.weekly.percent' "$state")% — consider Sonnet over Opus today."
+fi
+```
+
+**Optional exit-code mode.** Off by default; opt in with:
+
+```toml
+[statusline]
+exit_code_on_threshold = true
+```
+
+When enabled, ccline still prints the status line normally but exits with `1` on `warn` or `2` on `critical`. Useful if a host wants to detect threshold crossings via the statusline subprocess's exit code rather than reading the sidecar JSON.
+
 ### Usage history
 
 `ccline --stats` summarizes the JSONL history accumulated by the background refresh subprocess (`~/.claude/ccline/usage_history.jsonl`). One line per refresh; no network.
@@ -226,7 +281,7 @@ Each segment is a column in the status line. Toggle, recolor, or swap icons in `
 | **Git** | 🌿 / `2` | `main ✓` or `feat/x ● ↑3` | enabled | Branch + working-tree status |
 | **ContextWindow** | ⚡️ / `` | `49.8% · 498.0k tokens` | enabled | Conversation context usage out of model limit |
 | **Usage** | 8 circle glyphs ([scale](#usage-indicator-scale)) | `26% · 5-13-22` | disabled | Anthropic 5-hour utilization + reset time |
-| **WeeklyUsage** | same 8 circle glyphs | `32% · 5-14-0 ↑ 12%` | disabled | Anthropic weekly utilization + reset time + week-over-week trend (when enough history) |
+| **WeeklyUsage** | same 8 circle glyphs | `32% (S 4% O 12%) · 5-14-0 ↑ 12%` | disabled | Anthropic weekly utilization + optional per-model breakdown + reset time + week-over-week trend (when enough history) |
 | **BurnRate** | 🔥 / `` | `1.2k/m` or `—` | disabled | Tokens/minute over recent transcript window |
 | **ProjectedExhaust** | ⏳ / `2` | `~38m`, `@16:42`, `after reset`, `—` | disabled | ETA to 5-hour limit at current rate |
 | **Cost** | 💰 / `` | `$48.45` | disabled | Session cost in USD (from Claude Code) |
@@ -295,6 +350,23 @@ color = { r = 220, g = 60, b = 60 }   # 24-bit RGB
 ```
 
 Only the primary text picks up the threshold color — the icon and secondary text keep their configured colors so themes remain recognizable. Threshold lookup reads the segment's `metadata.percent` key, which Usage / WeeklyUsage populate automatically.
+
+### Per-model weekly breakdown (WeeklyUsage)
+
+Anthropic's `/api/oauth/usage` endpoint returns separate per-model weekly utilizations (`seven_day_sonnet`, `seven_day_opus`). Opt in with the `display = "compact"` option to append them to the WeeklyUsage primary:
+
+```toml
+[segments.weekly_usage.options]
+display = "compact"        # adds "S X% O Y%" suffix; default "primary_only" hides it
+```
+
+Examples:
+- `32% (S 4% O 12%)` — both Sonnet and Opus active this week.
+- `32% (S 4% O —)` — Sonnet used, Opus untouched (API returned `null`).
+- `32% (S — O 15%)` — Opus only.
+- No suffix at all if both are `null` (account hasn't used either yet).
+
+The aggregate `seven_day` percent (the leading `32%`) is independent — it counts the whole weekly quota, not just one model.
 
 ### Week-over-week trend (WeeklyUsage)
 
