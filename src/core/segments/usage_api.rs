@@ -370,11 +370,24 @@ fn refresh_inner() -> Result<(), String> {
 
 /// Build the segment's primary/secondary/metadata from a single utilization
 /// percent and its reset time. Both segments use the same shape; only the
-/// caller's choice of which utilization to pass differs.
-pub fn format_segment_data(util_percent: f64, resets_at: Option<&str>) -> SegmentData {
+/// caller's choice of which utilization + reset-time format to pass differs.
+///
+/// `now` is consumed only by [`ResetTimeFormat::Relative`]; pass `Utc::now()`
+/// from a non-test caller.
+pub fn format_segment_data(
+    util_percent: f64,
+    resets_at: Option<&str>,
+    reset_format: ResetTimeFormat,
+    now: DateTime<Utc>,
+) -> SegmentData {
     let percent = util_percent.round() as u8;
     let primary = format!("{}%", percent);
-    let secondary = format!("· {}", format_reset_time(resets_at));
+    let formatted_reset = format_reset_time(resets_at, reset_format, now);
+    let secondary = if formatted_reset.is_empty() {
+        String::new()
+    } else {
+        format!("· {}", formatted_reset)
+    };
 
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -408,25 +421,104 @@ pub fn get_circle_icon(utilization: f64) -> String {
     }
 }
 
-/// Render an RFC3339 reset timestamp as "month-day-hour" in the user's local
-/// timezone. Rounds the hour up when minute > 45 so the display reflects the
-/// next-effective hour boundary.
-pub fn format_reset_time(reset_time_str: Option<&str>) -> String {
-    if let Some(time_str) = reset_time_str {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
-            let mut local_dt = dt.with_timezone(&Local);
+/// How the reset timestamp is rendered in segment secondaries.
+///
+/// - [`MonthDayHour`] — `5-13-22` (default — historical behavior).
+///   Rounds the hour up when minute > 45 so the display reflects the
+///   next-effective hour boundary.
+/// - [`Clock`] — `22:00` local time (no date).
+/// - [`Relative`] — `in 4h12m` / `now` (≤ 60s) / `expired` (past).
+///   TZ-independent — uses only the wall-clock delta.
+/// - [`Iso`] — `2026-05-13T22:00` in local time (seconds dropped).
+/// - [`Hidden`] — empty string; caller suppresses the `· ` prefix too.
+///
+/// [`MonthDayHour`]: ResetTimeFormat::MonthDayHour
+/// [`Clock`]: ResetTimeFormat::Clock
+/// [`Relative`]: ResetTimeFormat::Relative
+/// [`Iso`]: ResetTimeFormat::Iso
+/// [`Hidden`]: ResetTimeFormat::Hidden
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResetTimeFormat {
+    #[default]
+    MonthDayHour,
+    Clock,
+    Relative,
+    Iso,
+    Hidden,
+}
+
+impl ResetTimeFormat {
+    pub fn from_option_str(s: &str) -> Self {
+        match s {
+            "clock" => ResetTimeFormat::Clock,
+            "relative" => ResetTimeFormat::Relative,
+            "iso" => ResetTimeFormat::Iso,
+            "hidden" => ResetTimeFormat::Hidden,
+            // "month_day_hour" or anything unknown falls back to default.
+            _ => ResetTimeFormat::MonthDayHour,
+        }
+    }
+}
+
+/// Render an RFC3339 reset timestamp according to the requested mode.
+/// `now` is needed only for `Relative` mode; ignored otherwise.
+pub fn format_reset_time(
+    reset_time_str: Option<&str>,
+    mode: ResetTimeFormat,
+    now: DateTime<Utc>,
+) -> String {
+    if mode == ResetTimeFormat::Hidden {
+        return String::new();
+    }
+    let Some(time_str) = reset_time_str else {
+        return "?".to_string();
+    };
+    let Ok(parsed) = DateTime::parse_from_rfc3339(time_str) else {
+        return "?".to_string();
+    };
+    match mode {
+        ResetTimeFormat::Hidden => String::new(),
+        ResetTimeFormat::MonthDayHour => {
+            let mut local_dt = parsed.with_timezone(&Local);
             if local_dt.minute() > 45 {
                 local_dt += Duration::hours(1);
             }
-            return format!(
+            format!(
                 "{}-{}-{}",
                 local_dt.month(),
                 local_dt.day(),
                 local_dt.hour()
-            );
+            )
+        }
+        ResetTimeFormat::Clock => {
+            let local_dt = parsed.with_timezone(&Local);
+            format!("{:02}:{:02}", local_dt.hour(), local_dt.minute())
+        }
+        ResetTimeFormat::Iso => {
+            let local_dt = parsed.with_timezone(&Local);
+            local_dt.format("%Y-%m-%dT%H:%M").to_string()
+        }
+        ResetTimeFormat::Relative => {
+            let delta = parsed.with_timezone(&Utc).signed_duration_since(now);
+            let secs = delta.num_seconds();
+            if secs < -60 {
+                "expired".to_string()
+            } else if secs.abs() <= 60 {
+                "now".to_string()
+            } else {
+                let total_minutes = secs / 60;
+                let hours = total_minutes / 60;
+                let mins = total_minutes % 60;
+                if hours == 0 {
+                    format!("in {}m", mins)
+                } else if mins == 0 {
+                    format!("in {}h", hours)
+                } else {
+                    format!("in {}h{}m", hours, mins)
+                }
+            }
         }
     }
-    "?".to_string()
 }
 
 // --- private cache + HTTP plumbing ---
@@ -612,22 +704,40 @@ mod tests {
     }
 
     // ---------- format_reset_time ----------
+    //
+    // T15: signature now takes mode + now. Tests use the default
+    // `MonthDayHour` mode to preserve the original characterization, with
+    // dedicated tests per other mode below.
+
+    fn fixed_now() -> DateTime<Utc> {
+        // 2026-05-14T12:00:00Z — used as the `now` reference in tests so
+        // `Relative` mode is deterministic.
+        Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap()
+    }
 
     #[test]
     fn reset_time_none_returns_placeholder() {
-        assert_eq!(format_reset_time(None), "?");
+        assert_eq!(
+            format_reset_time(None, ResetTimeFormat::MonthDayHour, fixed_now()),
+            "?"
+        );
     }
 
     #[test]
     fn reset_time_malformed_returns_placeholder() {
-        assert_eq!(format_reset_time(Some("not a date")), "?");
-        assert_eq!(format_reset_time(Some("")), "?");
-        assert_eq!(format_reset_time(Some("2026-13-99")), "?");
+        let m = ResetTimeFormat::MonthDayHour;
+        assert_eq!(format_reset_time(Some("not a date"), m, fixed_now()), "?");
+        assert_eq!(format_reset_time(Some(""), m, fixed_now()), "?");
+        assert_eq!(format_reset_time(Some("2026-13-99"), m, fixed_now()), "?");
     }
 
     #[test]
     fn reset_time_valid_has_month_day_hour_shape() {
-        let out = format_reset_time(Some("2026-05-13T15:30:00Z"));
+        let out = format_reset_time(
+            Some("2026-05-13T15:30:00Z"),
+            ResetTimeFormat::MonthDayHour,
+            fixed_now(),
+        );
         let parts: Vec<&str> = out.split('-').collect();
         assert_eq!(parts.len(), 3, "{:?}", out);
         for p in &parts {
@@ -635,11 +745,152 @@ mod tests {
         }
     }
 
+    // ---------- ResetTimeFormat (T15) ----------
+
+    #[test]
+    fn reset_format_from_option_string_round_trips() {
+        assert_eq!(
+            ResetTimeFormat::from_option_str("month_day_hour"),
+            ResetTimeFormat::MonthDayHour
+        );
+        assert_eq!(
+            ResetTimeFormat::from_option_str("clock"),
+            ResetTimeFormat::Clock
+        );
+        assert_eq!(
+            ResetTimeFormat::from_option_str("relative"),
+            ResetTimeFormat::Relative
+        );
+        assert_eq!(
+            ResetTimeFormat::from_option_str("iso"),
+            ResetTimeFormat::Iso
+        );
+        assert_eq!(
+            ResetTimeFormat::from_option_str("hidden"),
+            ResetTimeFormat::Hidden
+        );
+        // Unknown → default.
+        assert_eq!(
+            ResetTimeFormat::from_option_str("garbage"),
+            ResetTimeFormat::MonthDayHour
+        );
+    }
+
+    #[test]
+    fn reset_time_hidden_returns_empty() {
+        assert_eq!(
+            format_reset_time(
+                Some("2026-05-13T15:30:00Z"),
+                ResetTimeFormat::Hidden,
+                fixed_now()
+            ),
+            ""
+        );
+        // Hidden short-circuits even when input is None / malformed.
+        assert_eq!(
+            format_reset_time(None, ResetTimeFormat::Hidden, fixed_now()),
+            ""
+        );
+    }
+
+    #[test]
+    fn reset_time_clock_has_hh_mm_shape() {
+        let out = format_reset_time(
+            Some("2026-05-13T15:30:00Z"),
+            ResetTimeFormat::Clock,
+            fixed_now(),
+        );
+        let parts: Vec<&str> = out.split(':').collect();
+        assert_eq!(parts.len(), 2, "{:?}", out);
+        for p in &parts {
+            assert!(p.parse::<u32>().is_ok(), "non-numeric: {:?}", p);
+            assert_eq!(p.len(), 2, "expected zero-padded 2-digit: {:?}", p);
+        }
+    }
+
+    #[test]
+    fn reset_time_iso_has_iso_shape() {
+        let out = format_reset_time(
+            Some("2026-05-13T15:30:00Z"),
+            ResetTimeFormat::Iso,
+            fixed_now(),
+        );
+        // Should match `YYYY-MM-DDTHH:MM`.
+        assert!(out.contains('T'), "no T separator: {:?}", out);
+        assert_eq!(
+            out.len(),
+            16,
+            "expected 16 chars (YYYY-MM-DDTHH:MM): {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn reset_time_relative_in_future_minutes() {
+        // 4h12m in the future.
+        let reset = fixed_now() + Duration::minutes(4 * 60 + 12);
+        let out = format_reset_time(
+            Some(&reset.to_rfc3339()),
+            ResetTimeFormat::Relative,
+            fixed_now(),
+        );
+        assert_eq!(out, "in 4h12m");
+    }
+
+    #[test]
+    fn reset_time_relative_only_minutes() {
+        let reset = fixed_now() + Duration::minutes(38);
+        let out = format_reset_time(
+            Some(&reset.to_rfc3339()),
+            ResetTimeFormat::Relative,
+            fixed_now(),
+        );
+        assert_eq!(out, "in 38m");
+    }
+
+    #[test]
+    fn reset_time_relative_whole_hours() {
+        let reset = fixed_now() + Duration::hours(3);
+        let out = format_reset_time(
+            Some(&reset.to_rfc3339()),
+            ResetTimeFormat::Relative,
+            fixed_now(),
+        );
+        assert_eq!(out, "in 3h");
+    }
+
+    #[test]
+    fn reset_time_relative_now_when_near_zero() {
+        let reset = fixed_now() + Duration::seconds(30);
+        let out = format_reset_time(
+            Some(&reset.to_rfc3339()),
+            ResetTimeFormat::Relative,
+            fixed_now(),
+        );
+        assert_eq!(out, "now");
+    }
+
+    #[test]
+    fn reset_time_relative_expired_when_past() {
+        let reset = fixed_now() - Duration::minutes(5);
+        let out = format_reset_time(
+            Some(&reset.to_rfc3339()),
+            ResetTimeFormat::Relative,
+            fixed_now(),
+        );
+        assert_eq!(out, "expired");
+    }
+
     // ---------- format_segment_data ----------
 
     #[test]
     fn format_segment_data_renders_percent_and_keeps_dynamic_icon() {
-        let data = format_segment_data(67.0, Some("2026-05-13T15:30:00Z"));
+        let data = format_segment_data(
+            67.0,
+            Some("2026-05-13T15:30:00Z"),
+            ResetTimeFormat::MonthDayHour,
+            fixed_now(),
+        );
         assert_eq!(data.primary, "67%");
         assert!(data.secondary.starts_with("· "), "{:?}", data.secondary);
         assert!(data.metadata.contains_key("dynamic_icon"));
@@ -650,25 +901,35 @@ mod tests {
 
     #[test]
     fn format_segment_data_rounds_percent() {
-        let data = format_segment_data(22.6, None);
+        let data = format_segment_data(22.6, None, ResetTimeFormat::MonthDayHour, fixed_now());
         assert_eq!(data.primary, "23%");
     }
 
     #[test]
     fn format_segment_data_uses_own_value_for_icon() {
-        // Ensure the dynamic icon is keyed on the SAME value we display, not a
-        // detached weekly utilization. This is the regression we explicitly
-        // wanted to avoid carrying over from the pre-T02 Usage segment.
-        let usage_data = format_segment_data(8.0, None);
-        let weekly_data = format_segment_data(80.0, None);
+        let usage_data = format_segment_data(8.0, None, ResetTimeFormat::MonthDayHour, fixed_now());
+        let weekly_data =
+            format_segment_data(80.0, None, ResetTimeFormat::MonthDayHour, fixed_now());
         assert_eq!(
             usage_data.metadata.get("dynamic_icon").unwrap(),
             "\u{f0a9e}"
-        ); // slice_1
+        );
         assert_eq!(
             weekly_data.metadata.get("dynamic_icon").unwrap(),
             "\u{f0aa4}"
-        ); // slice_7
+        );
+    }
+
+    #[test]
+    fn format_segment_data_hidden_drops_secondary_prefix() {
+        let data = format_segment_data(
+            50.0,
+            Some("2026-05-13T15:30:00Z"),
+            ResetTimeFormat::Hidden,
+            fixed_now(),
+        );
+        // Hidden: no `· ` prefix because reset is empty string.
+        assert_eq!(data.secondary, "");
     }
 
     // ---------- classify_cache (T09) ----------

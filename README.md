@@ -388,9 +388,26 @@ trend_tolerance_hours = 24         # how far from "exactly 7 days ago" to accept
 
 ### Reset time format
 
-For Usage and WeeklyUsage, the secondary text shows the next reset in `month-day-hour` form in your local timezone (e.g. `5-13-22` = May 13, 22:00 local). If the minute is past 45, the hour rounds up to reflect the next effective boundary.
+For Usage and WeeklyUsage, the secondary text shows the next reset window. The format is configurable per segment:
 
-The format is currently hardcoded; a future task (see `docs/tasks/T15-...md`) makes this configurable (clock-only, relative, ISO, hidden).
+```toml
+[segments.usage.options]
+reset_time_format = "month_day_hour"   # default
+# reset_time_format = "clock"
+# reset_time_format = "relative"
+# reset_time_format = "iso"
+# reset_time_format = "hidden"
+```
+
+| Mode | Example (reset at 2026-05-14 22:00 local) | Notes |
+| --- | --- | --- |
+| `month_day_hour` (default) | `5-14-22` | `M-D-H` local. Rounds the hour up when minute > 45. Historical default. |
+| `clock` | `22:00` | Local HH:MM, no date. |
+| `relative` | `in 4h12m`, `in 38m`, `now`, `expired` | Wall-clock delta from now. TZ-independent. |
+| `iso` | `2026-05-14T22:00` | Local ISO with seconds dropped. |
+| `hidden` | (empty) | Secondary text is suppressed entirely — no `· ` prefix. |
+
+The choice is per-segment, so Usage can show one format and WeeklyUsage another.
 
 ### BurnRate `token_basis`
 

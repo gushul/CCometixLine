@@ -1,4 +1,4 @@
-use super::usage_api;
+use super::usage_api::{self, ResetTimeFormat};
 use super::{Segment, SegmentData};
 use crate::config::{InputData, SegmentId};
 use crate::utils::usage_history;
@@ -19,19 +19,27 @@ impl WeeklyUsageSegment {
 impl Segment for WeeklyUsageSegment {
     fn collect(&self, _input: &InputData) -> Option<SegmentData> {
         let snapshot = usage_api::fetch_or_cached(SegmentId::WeeklyUsage)?;
-        let mut data = usage_api::format_segment_data(
-            snapshot.seven_day_utilization,
-            snapshot.seven_day_resets_at.as_deref(),
-        );
-        data.metadata.insert(
-            "five_hour_utilization".to_string(),
-            snapshot.five_hour_utilization.to_string(),
-        );
 
         let config = crate::config::Config::load().ok();
         let opts = config
             .as_ref()
             .and_then(|c| c.segments.iter().find(|s| s.id == SegmentId::WeeklyUsage));
+
+        let reset_format = opts
+            .and_then(|sc| sc.options.get("reset_time_format"))
+            .and_then(|v| v.as_str().map(ResetTimeFormat::from_option_str))
+            .unwrap_or_default();
+        let now = Utc::now();
+        let mut data = usage_api::format_segment_data(
+            snapshot.seven_day_utilization,
+            snapshot.seven_day_resets_at.as_deref(),
+            reset_format,
+            now,
+        );
+        data.metadata.insert(
+            "five_hour_utilization".to_string(),
+            snapshot.five_hour_utilization.to_string(),
+        );
 
         // T06 per-model breakdown: append `S X% O Y%` to primary when display
         // is "compact" and at least one of the per-model values is known.
